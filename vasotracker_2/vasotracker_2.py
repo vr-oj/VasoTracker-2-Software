@@ -127,7 +127,21 @@ import utilities.VT_Pressure
 from utilities.VT_Pressure import PressureController
 from cameras import Camera, CameraBase
 from config import AcquisitionSettings, Config, GraphAxisSettings
-import customtkinter as ctk
+
+try:
+    import customtkinter as ctk
+except ImportError as exc:
+    import tkinter as _tk
+    from tkinter import messagebox as _tmb
+
+    root = _tk.Tk()
+    root.withdraw()
+    _tmb.showerror(
+        "Missing dependency",
+        "The package 'customtkinter' is required. Install it with 'pip install customtkinter' and restart VasoTracker.",
+    )
+    root.destroy()
+    raise SystemExit("customtkinter is required to run VasoTracker") from exc
 import sv_ttk
 
 
