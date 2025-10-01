@@ -82,10 +82,20 @@ import time
 import traceback
 from typing import Callable, Dict, List, Optional, Tuple, Type
 import webbrowser
-# Suppress pygame welcome message
-sys.stdout = open(os.devnull, 'w')
-import pygame
-sys.stdout = sys.__stdout__  # Restore stdout
+
+# Suppress pygame welcome message if available, otherwise continue without music support
+_stdout_backup = sys.stdout
+_null_stream = open(os.devnull, "w")
+sys.stdout = _null_stream
+try:
+    import pygame  # type: ignore
+except ImportError:
+    pygame = None  # type: ignore
+finally:
+    sys.stdout = _stdout_backup
+    _null_stream.close()
+
+pygame_available = pygame is not None
 
 # Third-party imports
 import random
@@ -3326,6 +3336,13 @@ class Menus:
     
     def play_band(self):
         """Play a random MP3 song from the music/ folder in a background thread."""
+        if not pygame_available:
+            tmb.showinfo(
+                "Music unavailable",
+                "Install pygame to enable in-app music playback.",
+            )
+            return
+
         def play_music_background():
             # Initialize pygame mixer (if not already initialized)
             if not pygame.mixer.get_init():
