@@ -51,16 +51,17 @@ print(f"PyDAQmx installed: {is_pydaqmx_installed()}")
 
 '''
 try:
-    import PyDAQmx
-    from PyDAQmx import *
-    pydaqmx_available = True
-except:
-    pydaqmx_available = False
+    import PyDAQmx  # type: ignore
+    from PyDAQmx import *  # noqa: F401,F403
+    _pydaqmx_available = True
+except Exception as exc:
+    PyDAQmx = None  # type: ignore
+    _pydaqmx_available = False
+    print(f"PyDAQmx import failed: {exc}")
+
 
 def is_pydaqmx_available():
-    return pydaqmx_available
-
-pydaqmx_available = True
+    return _pydaqmx_available
 
 
 #########################################################################################
