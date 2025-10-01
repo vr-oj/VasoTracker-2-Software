@@ -162,6 +162,39 @@ class ServoSettings(Configurator):
 
 
 @dataclass
+class VasoMotoSettings(Configurator):
+    enabled: bool = False
+    control_mode: str = "Manual"
+    serial_port: str = ""
+    calibration_factor: float = 1.0
+
+    def set_values(self, state: "VtState"):
+        vm = state.toolbar.vasomoto
+        vm.enabled.set(self.enabled)
+        vm.control_mode.set(self.control_mode)
+        vm.serial_port.set(self.serial_port)
+        vm.calibration_factor.set(self.calibration_factor)
+
+    @classmethod
+    def from_state(cls, state: "VtState"):
+        vm = state.toolbar.vasomoto
+        enabled = bool(vm.enabled.get())
+        control_mode = vm.control_mode.get() or "Manual"
+        serial_port = vm.serial_port.get()
+        calibration_factor = vm.calibration_factor.get()
+        try:
+            calibration_value = float(calibration_factor)
+        except (TypeError, ValueError):
+            calibration_value = 1.0
+        return cls(
+            enabled=enabled,
+            control_mode=control_mode,
+            serial_port=serial_port,
+            calibration_factor=calibration_value,
+        )
+
+
+@dataclass
 class PressureControlSettings(Configurator):
     default_pressure: float = 20.0
     time_interval: float = 300.0
@@ -218,6 +251,7 @@ class Config(Configurator):
     acquisition: AcquisitionSettings = field(default_factory=AcquisitionSettings)
     analysis: AnalysisSettings = field(default_factory=AnalysisSettings)
     servo: ServoSettings = field(default_factory=ServoSettings)
+    vasomoto: VasoMotoSettings = field(default_factory=VasoMotoSettings)
     graph_axes: GraphAxisSettings = field(default_factory=GraphAxisSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
     pressure_control: PressureControlSettings = field(

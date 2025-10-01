@@ -305,6 +305,14 @@ class ServoSettingsState:
 
 
 @dataclass
+class VasoMotoSettingsState:
+    enabled: BooleanVar = field(default_factory=BooleanVar)
+    control_mode: StringVar = field(default_factory=lambda: StringVar(value="Manual"))
+    serial_port: StringVar = field(default_factory=StringVar)
+    calibration_factor: DoubleVar = field(default_factory=DoubleVar)
+
+
+@dataclass
 class PressureProtocolSettingsState:
     pressure_start: IntVar = field(default_factory=IntVar)
     pressure_stop: IntVar = field(default_factory=IntVar)
@@ -335,6 +343,7 @@ class ToolbarState:
         default_factory=ImageDimensionsPaneState
     )
     servo: ServoSettingsState = field(default_factory=ServoSettingsState)
+    vasomoto: VasoMotoSettingsState = field(default_factory=VasoMotoSettingsState)
     pressure_protocol: PressureProtocolSettingsState = field(
         default_factory=PressureProtocolSettingsState
     )
@@ -637,6 +646,7 @@ class VtState:
     arduino_controller: Optional[ArduinoController] = None
     pressure_controller: Optional[PressureController] = None
     servo: ServoSettingsState = field(default_factory=ServoSettingsState)
+    vasomoto: VasoMotoSettingsState = field(default_factory=VasoMotoSettingsState)
     pressure_protocol: PressureProtocolSettingsState = field(default_factory=PressureProtocolSettingsState)
 
 
@@ -917,6 +927,12 @@ class Model:
         tb.pressure_protocol.hold_pressure.set(True)
 
         tb.start_stop.record.set(True)
+
+        if not tb.vasomoto.control_mode.get():
+            tb.vasomoto.control_mode.set("Manual")
+        if tb.vasomoto.calibration_factor.get() in (0, 0.0):
+            tb.vasomoto.calibration_factor.set(1.0)
+        tb.vasomoto.enabled.set(False)
 
     def setup_default_ui_state_loadfile(self):
         tb = self.state.toolbar
@@ -2825,6 +2841,83 @@ class ServoSettingsPane(ToolbarPane):
             pass
 
 
+class VasoMotoSettingsPane(ToolbarPane):
+    def __init__(self, parent, model_vars: VtState):
+        super().__init__(parent, height=200, width=200)
+        self.parent = parent
+        self.model_vars = model_vars
+        sv = model_vars.toolbar.vasomoto
+
+        make_entry = make_entry_factory(self)
+
+        self.frame_label = ctk.CTkLabel(
+            self,
+            text="VasoMoto setup",
+            font=(default_font, 16, "bold"),
+            fg_color=frame_label_color,
+            height=frame_label_height,
+            text_color="white",
+        )
+        self.frame_label.grid(row=0, column=0, columnspan=2, padx=1, pady=1, sticky="nsew")
+
+        self.enable_checkbox = ctk.CTkCheckBox(
+            self,
+            text="Enable VasoMoto",
+            font=(default_font, default_font_size),
+            variable=sv.enabled,
+            checkbox_height=20,
+            checkbox_width=20,
+        )
+        self.enable_checkbox.grid(row=1, column=0, columnspan=2, padx=10, pady=(8, 5), sticky=tk.W)
+
+        mode_options = ["Manual", "Automatic"]
+        current_mode = sv.control_mode.get()
+        if current_mode not in mode_options:
+            current_mode = mode_options[0]
+            sv.control_mode.set(current_mode)
+
+        ctk.CTkLabel(self, text="Mode:", font=(default_font, default_font_size)).grid(
+            row=2, column=0, sticky=tk.E, padx=10, pady=5
+        )
+        self.mode_entry = make_entry(
+            ttk.OptionMenu,
+            args=(sv.control_mode, current_mode, *mode_options),
+            row=2,
+            column=1,
+            sticky=tk.W,
+        )
+
+        ctk.CTkLabel(self, text="Serial port:", font=(default_font, default_font_size)).grid(
+            row=3, column=0, sticky=tk.E, padx=10, pady=5
+        )
+        self.port_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=sv.serial_port,
+            row=3,
+            column=1,
+            width=120,
+            fg_color="white",
+        )
+
+        ctk.CTkLabel(self, text="Calibration factor:", font=(default_font, default_font_size)).grid(
+            row=4, column=0, sticky=tk.E, padx=10, pady=5
+        )
+        self.calibration_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=sv.calibration_factor,
+            row=4,
+            column=1,
+            width=120,
+            fg_color="white",
+        )
+
+        tooltip = ToolTip(self)
+        tooltip.register(self.enable_checkbox, "Toggle the VasoMoto controller on or off.")
+        tooltip.register(self.mode_entry, "Choose how VasoMoto responds to control signals.")
+        tooltip.register(self.port_entry, "Specify the serial port VasoMoto should use (e.g., COM3 or /dev/tty.usbmodem).")
+        tooltip.register(self.calibration_entry, "Set the conversion factor between control units and device output.")
+
+
 class PressureControlPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
         super().__init__(parent, height=400, width=400)
@@ -3292,6 +3385,7 @@ class Menus:
 
         self.settings_menu.add_separator()
         self.settings_menu.add_command(label="DAQ Setup")
+        self.settings_menu.add_command(label="VasoMoto Setup")
         self.settings_menu.add_command(label="Configure Pressure Protocol")
 
         notepad_menu = tk.Menu(self.menu_bar, tearoff=0)
@@ -4622,6 +4716,9 @@ class Controller:
         settings_menu.entryconfig(
             settings_menu.index("DAQ Setup"), command=self.show_daq_settings
         )
+        settings_menu.entryconfig(
+            settings_menu.index("VasoMoto Setup"), command=self.show_vasomoto_settings
+        )
 
         settings_menu = menu.settings_menu
         settings_menu.entryconfig(
@@ -5147,6 +5244,33 @@ class Controller:
         popup.attributes('-topmost', True)
 
         # Now show the window after everything is fully generated
+        popup.deiconify()
+
+
+    def show_vasomoto_settings(self):
+        popup = tk.Toplevel(root)
+        popup.title("VasoMoto Settings")
+
+        icon_path = os.path.join(images_folder, 'vt_icon.ICO')
+        popup.iconbitmap(icon_path)
+
+        popup.resizable(False, False)
+
+        label = ctk.CTkLabel(
+            popup,
+            text="Configure VasoMoto control settings:",
+            font=(default_font, default_font_size),
+        )
+        label.pack()
+
+        frame = tk.Frame(popup)
+        frame.pack()
+
+        self.vasomoto_settings_pane = VasoMotoSettingsPane(frame, self.model.state)
+        self.vasomoto_settings_pane.grid(sticky="nsew")
+
+        popup.update_idletasks()
+        popup.attributes('-topmost', True)
         popup.deiconify()
 
 
