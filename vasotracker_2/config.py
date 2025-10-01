@@ -137,12 +137,13 @@ class MemorySettings(Configurator):
 
 @dataclass
 class ServoSettings(Configurator):
-    
+    device_type: str = "NI"
     device: str = "Dev1"
     ao_channel: str = "ao1"
 
     def set_values(self, state: "VtState"):
         servo = state.toolbar.servo
+        servo.device_type.set(self.device_type)
         servo.device.set(self.device)
         servo.ao_channel.set(self.ao_channel)
         print("Device: ", self.device)
@@ -150,9 +151,11 @@ class ServoSettings(Configurator):
     @classmethod
     def from_state(cls, state: "VtState"):
         servo = state.toolbar.servo
+        device_type = servo.device_type.get()
         device = servo.device.get()
         ao_channel= servo.ao_channel.get()
         return cls(
+            device_type=device_type,
             device=device,
             ao_channel=ao_channel,
         )

@@ -78,6 +78,10 @@ class PressureController:
         self.view = view
         self.pydaqmx_available = pydaqmx_available
         self.task = None
+        self.arduino = None
+        self.current_device_type = (
+            self.model.state.toolbar.servo.device_type.get() or "NI"
+        )
         #self.initialize_pressure_system()
         self.start_pressure = None
         self.stop_pressure = None
@@ -88,7 +92,8 @@ class PressureController:
         self.multiplier = 1
         self.last_update_time = None
         self.update_threshold = 1  # Minimum time interval in seconds between updates
-    
+        self.on_option_changed()
+
     def end_protocol(self):
         try:
             self.view.toolbar.pressure_control_settings.toggle_protocol_button()
@@ -98,24 +103,53 @@ class PressureController:
 
 
     def initialize_pressure_system(self):
-        if self.pydaqmx_available:
-            self.task = PyDAQmx.Task()
-            self.set_dev()
+        self.on_option_changed()
 
-        servo_settings = self.model.state.toolbar.servo
-        device = servo_settings.device.get()
-        ao_channel = servo_settings.ao_channel.get()
+    def set_arduino(self, arduino):
+        self.arduino = arduino
+        self.on_option_changed()
 
-        print(f"The device is {device}, and the aochannel is {ao_channel}")
+    def on_device_type_changed(self):
+        device_type = self.model.state.toolbar.servo.device_type.get() or "NI"
+        if device_type != self.current_device_type:
+            if device_type != "NI":
+                self._clear_task()
+        self.current_device_type = device_type
+        self.on_option_changed()
 
     def on_option_changed(self, *args):
         servo_settings = self.model.state.toolbar.servo
-        device = servo_settings.device.get()
-        ao_channel = servo_settings.ao_channel.get()
-        if device != "" and ao_channel != "":
-            
-            if self.set_dev():
-                self.view.toolbar.pressure_control_settings.enable_buttons()
+        device_type = servo_settings.device_type.get() or "NI"
+
+        if device_type == "NI":
+            device = servo_settings.device.get()
+            ao_channel = servo_settings.ao_channel.get()
+
+            if not self.pydaqmx_available:
+                print("PyDAQmx is not available; cannot control NI hardware.")
+                self._update_manual_control_state(False)
+                self._lock_pressure_protocol_settings()
+                return
+
+            if device and ao_channel:
+                if self.set_dev():
+                    self._update_manual_control_state(True)
+                    self._unlock_pressure_protocol_settings()
+                else:
+                    self._update_manual_control_state(False)
+                    self._lock_pressure_protocol_settings()
+            else:
+                self._update_manual_control_state(False)
+                self._lock_pressure_protocol_settings()
+        elif device_type == "Arduino":
+            if self.arduino:
+                self._update_manual_control_state(True)
+                self._unlock_pressure_protocol_settings()
+            else:
+                print("Arduino controller not initialised.")
+                self._update_manual_control_state(False)
+        else:
+            self._update_manual_control_state(False)
 
     def update_intvl(self):
         current_time = time.time()
@@ -198,7 +232,8 @@ class PressureController:
 
 
     def set_dev(self):
-
+        if not self.pydaqmx_available:
+            return False
         time.sleep(2)
         servo_settings = self.model.state.toolbar.servo
         device = servo_settings.device.get()
@@ -214,14 +249,9 @@ class PressureController:
             self.task = PyDAQmx.Task()
             self.task.CreateAOVoltageChan(f"/{device}/{ao_channel}", "", -10.0, 10.0, PyDAQmx.DAQmx_Val_Volts, None)
             self.task.StartTask()
-            # Assuming 'set_pressure_entry' is part of the view
-            self.view.toolbar.pressure_protocol_settings.set_unlock_state()  # Enable the entry
-            self.view.toolbar.pressure_protocol_settings.set_unlock_state() 
             return True  # Device successfully set
         except Exception as e:
             print("Failed to connect to NI device:", e)
-            self.view.toolbar.pressure_protocol_settings.set_lock_state()  # Disable the entry
-            self.view.toolbar.pressure_protocol_settings.set_lock_state() 
             # Temporarily remove the trace callback if necessary
             try:
                 servo_settings.device.trace_remove(...)
@@ -242,23 +272,33 @@ class PressureController:
         
 
     def adjust_pressure(self, pressure_value, update_table=True):
-        if not self.pydaqmx_available:
-            return
-
         # Validate and adjust pressure value to be within the acceptable range
         pressure_value = max(min(200, pressure_value), 0)
 
         pressure_protocol_settings = self.model.state.toolbar.pressure_protocol
         pressure_protocol_settings.set_pressure.set(pressure_value)
 
-        # Update the pressure using PyDAQmx
-        try:
-            # This line writes the analog value to the DAQ device to set the pressure
-            # The pressure_value is divided by 100, assuming it's being scaled to the DAQ device's range
-            self.task.WriteAnalogScalarF64(1, 10.0, pressure_value / 100, None)
-        except Exception as e:
-            # Handle exceptions, possibly log or show an error message
-            print("Exception occurred while setting pressure:", e)
+        device_type = self.model.state.toolbar.servo.device_type.get() or "NI"
+
+        if device_type == "NI":
+            if not self.pydaqmx_available or self.task is None:
+                print("Cannot set pressure: NI hardware is not ready.")
+                return
+            try:
+                self.task.WriteAnalogScalarF64(1, 10.0, pressure_value / 100, None)
+            except Exception as e:
+                print("Exception occurred while setting pressure:", e)
+        elif device_type == "Arduino":
+            if not self.arduino:
+                print("Cannot set pressure: Arduino controller is not available.")
+                return
+            try:
+                self.arduino.sendData(int(round(pressure_value)))
+            except Exception as e:
+                print(f"Exception occurred while sending pressure to Arduino: {e}")
+        else:
+            print(f"Unsupported device type '{device_type}' for pressure control.")
+            return
 
         # Optionally update the table
         # If update_table is True, this will update the UI to reflect the new pressure
@@ -266,3 +306,38 @@ class PressureController:
             # Assuming this method updates a UI element to show the current pressure
             self.model.state.table.label.set(f"Set pressure = {pressure_value} mmHg")
             self.model.add_table_row()
+
+    def _update_manual_control_state(self, enabled: bool):
+        try:
+            controls = self.view.toolbar.pressure_control_settings
+        except AttributeError:
+            return
+
+        try:
+            if enabled:
+                controls.enable_buttons()
+            else:
+                controls.disable_buttons()
+        except Exception:
+            pass
+
+    def _unlock_pressure_protocol_settings(self):
+        try:
+            self.view.toolbar.pressure_protocol_settings.set_unlock_state()
+        except Exception:
+            pass
+
+    def _lock_pressure_protocol_settings(self):
+        try:
+            self.view.toolbar.pressure_protocol_settings.set_lock_state()
+        except Exception:
+            pass
+
+    def _clear_task(self):
+        if self.task is not None:
+            try:
+                self.task.ClearTask()
+            except Exception:
+                pass
+            finally:
+                self.task = None
