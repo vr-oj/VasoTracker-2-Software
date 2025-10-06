@@ -18,6 +18,12 @@ device_type = "NI"
 device = "Dev1"
 ao_channel = "ao1"
 
+[vasomoto]
+enabled = false
+control_mode = "Manual"
+serial_port = ""
+calibration_factor = 1.0
+
 [graph_axes]
 x_min = -1200.0
 x_max = 0.0
