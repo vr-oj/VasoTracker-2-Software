@@ -3108,6 +3108,7 @@ class PressureDevicePane(ToolbarPane):
         # React to device selection changes
         settings.device_type.trace_add("write", self._on_device_change)
         self._apply_field_states()
+        self._device_change_pending = False
 
     def _apply_field_states(self) -> None:
         device = self.model_vars.toolbar.pressure_device.device_type.get().lower()
@@ -3121,11 +3122,33 @@ class PressureDevicePane(ToolbarPane):
         self.ni_scale_entry.configure(state=ni_state)
 
     def _on_device_change(self, *args) -> None:
+        if getattr(self, "_device_change_pending", False):
+            return
+
+        self._device_change_pending = True
         self._apply_field_states()
+
         controller = self.model_vars.pressure_controller
-        if controller is not None:
-            controller.configure_from_state(start_immediately=True)
-            controller.start()
+        if controller is None:
+            self._device_change_pending = False
+            return
+
+        def apply_change():
+            try:
+                controller.configure_from_state(start_immediately=True)
+                controller.start()
+                active_type = controller.active_device_type()
+                selected_type = (
+                    self.model_vars.toolbar.pressure_device.device_type.get().strip().lower()
+                )
+                if active_type == "none" and selected_type not in ("", "none"):
+                    # Revert the selection so we don't keep retrying missing hardware.
+                    self.model_vars.toolbar.pressure_device.device_type.set("None")
+                    self._apply_field_states()
+            finally:
+                self._device_change_pending = False
+
+        self.after(0, apply_change)
 
 
 class PressureControlPane(ToolbarPane):

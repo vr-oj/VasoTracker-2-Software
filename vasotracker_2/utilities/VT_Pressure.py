@@ -315,6 +315,10 @@ class PressureController:
     def get_latest(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         return self._latest
 
+    def active_device_type(self) -> str:
+        """Return the lowercase name of the currently active pressure device."""
+        return str(self._device_ctx.type_name or "").lower()
+
     # ------------------------------------------------------------------
     # Protocol handling (largely retained from previous implementation)
     # ------------------------------------------------------------------
