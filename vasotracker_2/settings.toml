@@ -14,7 +14,7 @@ threshold = 5.5
 num_threads = 1
 
 [pressure]
-device = "Arduino"
+device = "None"
 port = "COM5"
 baud = 115200
 ni_device = "Dev1"
