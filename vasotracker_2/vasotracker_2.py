@@ -3504,10 +3504,6 @@ class ToolbarView(ctk.CTkFrame):
         self.panes.append(self.caliper_roi)
         self.caliper_roi.pack(side='left', fill='y')
 
-        self.pressure_device_settings = PressureDevicePane(self, state)
-        self.panes.append(self.pressure_device_settings)
-        self.pressure_device_settings.pack(side='left', fill='y')
-
         self.pressure_control_settings = PressureControlPane(self, state)
         self.panes.append(self.pressure_control_settings)
         self.pressure_control_settings.pack(side='left', fill='y')
@@ -3592,9 +3588,10 @@ class Menus:
         self.settings_menu.add_command(label="Graph Axes")
         self.settings_menu.add_command(label="Show/Hide Traces")
 
+        self.settings_menu.add_separator()
+        self.settings_menu.add_command(label="Pressure Hardware")
+
         if is_pydaqmx_available:
-            self.settings_menu.add_separator()
-            self.settings_menu.add_command(label="DAQ Setup")
             self.settings_menu.add_command(label="Configure Pressure Protocol")
 
         notepad_menu = tk.Menu(self.menu_bar, tearoff=0)
@@ -4914,13 +4911,10 @@ class Controller:
         settings_menu.entryconfig(
             settings_menu.index("Show/Hide Traces"), command=self.show_plotting_popup
         )
+        settings_menu.entryconfig(
+            settings_menu.index("Pressure Hardware"), command=self.show_pressure_hardware_popup
+        )
         if is_pydaqmx_available:
-            # Create the "DAQ Setup" dropdown menu
-            settings_menu = menu.settings_menu
-            settings_menu.entryconfig(
-                settings_menu.index("DAQ Setup"), command=self.show_daq_settings
-            )
-
             # Create the "Pressure Protocol" dropdown menu
             settings_menu = menu.settings_menu
             settings_menu.entryconfig(
@@ -5178,7 +5172,7 @@ class Controller:
             self.pressure_controller.configure_from_state(start_immediately=True)
             self.pressure_controller.start()
 
-        self.show_daq_settings()
+        self.show_pressure_hardware_popup()
 
     def open_pressure_protocol_settings(self):
         self.show_pressure_settings()
@@ -5430,10 +5424,10 @@ class Controller:
         
 
 
-    def show_daq_settings(self):
+    def show_pressure_hardware_popup(self):
         # Create the popup window
         popup = tk.Toplevel(root)
-        popup.title("NI DAQ Settings:")
+        popup.title("Pressure Hardware Settings")
 
         # Set the window icon to be the same as the main window
         icon_path = os.path.join(images_folder, 'vt_icon.ICO')  # Path to the icon file
@@ -5455,8 +5449,8 @@ class Controller:
         frame.pack()
 
         # Create an instance of the hardware settings within the frame
-        self.menu_plotting_pane = PressureDevicePane(frame, self.model.state)
-        self.menu_plotting_pane.grid(sticky="nsew")
+        pressure_pane = PressureDevicePane(frame, self.model.state)
+        pressure_pane.grid(sticky="nsew")
 
         # Ensure all the widgets are updated before showing the window
         popup.update_idletasks()
