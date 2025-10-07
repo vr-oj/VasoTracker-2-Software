@@ -72,6 +72,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import IntEnum, auto
 from functools import partial
+import math
 from math import hypot
 import os
 from pathlib import Path
@@ -805,6 +806,16 @@ class Model:
         self.output_path2 = None
         self.tiff_writer1 = None
         self.tiff_writer2 = None
+        # Synchronised recording state
+        self._next_save_time = None
+        self._tiff_page_index = -1
+        self._t0 = None
+        self.write_full_trace = True
+        self.write_recorded_only = False
+        self.recorded_csv_file = None
+        self.recorded_csv_writer = None
+        self.recorded_csv_path = None
+        self.trace_fieldnames = None
 
 
         try:
@@ -827,6 +838,7 @@ class Model:
         self.prev_update = 0.0
         self.time_elapsed = 0.0
         self.frame_count = 0
+        self.frames_elapsed = 0
 
         self.setup_default_ui_state()
 
@@ -843,6 +855,9 @@ class Model:
 
     def setup_output_files(self, output_path):
         """Needs to be called before acquiring anything"""
+        # Close any previous handles before creating new ones
+        self._close_outputs(close_trace=True)
+
         self.output_path = output_path
         self.output_dir, self.output_filename = os.path.split(output_path)
         self.output_stem = os.path.splitext(self.output_filename)[0]
@@ -851,10 +866,42 @@ class Model:
         # NOTE(cmo): This nested output file can be worked with pretty easily by
         # splitting the each of the quoted variadic columns in Excel's
         # PowerQuery (better than text to columns as it won't overwrite).
+        self.trace_fieldnames = [
+            "Time (s)",
+            "Time (hh:mm:ss)",
+            "Time_s_exact",
+            "FrameNumber",
+            "Saved",
+            "TiffPage",
+            "Outer Diameter",
+            "Inner Diameter",
+            "Table Marker",
+            "Temperature (oC)",
+            "Pressure 1 (mmHg)",
+            "Pressure 2 (mmHg)",
+            "Avg Pressure (mmHg)",
+            "Set Pressure (mmHg)",
+            "Caliper length",
+            "Outer Profiles",
+            "Inner Profiles",
+            "Outer Profiles Valid",
+            "Inner Profiles Valid",
+        ]
+
         self.output_file = open(self.output_path, "w", newline="")
-        self.output_writer = csv.writer(self.output_file)
-        self.output_writer.writerow(self.state.measure.headers())
+        self.output_writer = csv.DictWriter(self.output_file, fieldnames=self.trace_fieldnames)
+        self.output_writer.writeheader()
         self.output_file.flush()
+
+        # Optional recorded-only CSV (Saved rows) - append-only path stored for reuse
+        self.recorded_csv_writer = None
+        self.recorded_csv_file = None
+        self.recorded_csv_path = os.path.join(self.output_dir, f"{self.output_stem}_trace_recorded.csv")
+        if self.write_recorded_only:
+            self.recorded_csv_file = open(self.recorded_csv_path, "w", newline="")
+            self.recorded_csv_writer = csv.DictWriter(self.recorded_csv_file, fieldnames=self.trace_fieldnames)
+            self.recorded_csv_writer.writeheader()
+            self.recorded_csv_file.flush()
 
         self.notepad_path = os.path.splitext(output_path)[0] + "_notes" + ".txt"
 
@@ -905,6 +952,84 @@ class Model:
             self.executor = ProcessPoolExecutor(max_workers=num_threads)
         self.futures_to_resolve = deque()
 
+    def _reset_save_gate(self, t_now: float, interval: float) -> None:
+        """Prime the save gate so it fires at most once per recording interval."""
+        if interval and interval > 0:
+            k = math.ceil(t_now / interval)
+            self._next_save_time = k * interval
+        else:
+            self._next_save_time = None
+
+    def _should_save_now(self, t_now: float, interval: float) -> bool:
+        """Return True exactly once per interval, even with frame jitter."""
+        nxt = self._next_save_time
+        if not interval or interval <= 0 or nxt is None:
+            return False
+        if t_now + 1e-9 >= nxt:
+            missed = max(1, int((t_now - nxt) // interval) + 1)
+            self._next_save_time = nxt + missed * interval
+            return True
+        return False
+
+    def _get_record_interval(self) -> float:
+        try:
+            interval = float(self.state.toolbar.acq.rec_interval.get())
+        except Exception:
+            return 0.0
+        return max(0.0, interval)
+
+    def _handle_record_start(self) -> None:
+        self._tiff_page_index = -1
+        self._t0 = time.perf_counter()
+        interval = self._get_record_interval()
+        self._reset_save_gate(0.0, interval)
+        if (
+            self.write_recorded_only
+            and self.recorded_csv_writer is None
+            and self.recorded_csv_path
+            and self.trace_fieldnames
+        ):
+            append_mode = "a" if os.path.exists(self.recorded_csv_path) else "w"
+            self.recorded_csv_file = open(self.recorded_csv_path, append_mode, newline="")
+            self.recorded_csv_writer = csv.DictWriter(
+                self.recorded_csv_file, fieldnames=self.trace_fieldnames
+            )
+            if append_mode == "w":
+                self.recorded_csv_writer.writeheader()
+
+    def _handle_record_stop(self) -> None:
+        self._next_save_time = None
+        self._t0 = None
+        self._close_outputs(close_trace=False)
+
+    def _close_outputs(self, close_trace: bool = False) -> None:
+        """Close recording artefacts safely; optionally close trace/table files."""
+        try:
+            if self.tiff_writer1 is not None:
+                self.tiff_writer1.close()
+                self.tiff_writer1 = None
+            if self.tiff_writer2 is not None:
+                self.tiff_writer2.close()
+                self.tiff_writer2 = None
+            if self.recorded_csv_file is not None:
+                self.recorded_csv_file.flush()
+                self.recorded_csv_file.close()
+                self.recorded_csv_file = None
+                self.recorded_csv_writer = None
+            if getattr(self, "output_file", None) is not None:
+                self.output_file.flush()
+                if close_trace:
+                    self.output_file.close()
+                    self.output_file = None
+                    self.output_writer = None
+            if close_trace and getattr(self, "table_file", None) is not None:
+                self.table_file.flush()
+                self.table_file.close()
+                self.table_file = None
+                self.table_writer = None
+        except Exception as exc:
+            print("Close outputs error:", exc)
+
     def load_config(self, config: Config):
         self.configure = config
         config.set_values(self.state)
@@ -921,6 +1046,7 @@ class Model:
     def get_shutdown_callback(self):
         def cb():
             self.run_acq_thread = False
+            self._close_outputs(close_trace=True)
             if self.state.camera is not None:
                 self.state.camera.shutdown()
 
@@ -1010,6 +1136,25 @@ class Model:
             set_tracking_file,
         )
 
+        def handle_record_toggle(*args):
+            if self.state.toolbar.start_stop.record.get():
+                self._handle_record_start()
+            else:
+                self._handle_record_stop()
+
+        tb.start_stop.record.trace_add("write", handle_record_toggle)
+
+        def handle_rec_interval_change(*args):
+            if not self.state.toolbar.start_stop.record.get():
+                return
+            if self._t0 is None:
+                return
+            interval = self._get_record_interval()
+            t_now = time.perf_counter() - self._t0
+            self._reset_save_gate(t_now, interval)
+
+        tb.acq.rec_interval.trace_add("write", handle_rec_interval_change)
+
 
         def set_acq_thread_sleep(*args):
             if self.state.toolbar.acq.fast_mode.get():
@@ -1035,7 +1180,7 @@ class Model:
             return
 
         tb = self.state.toolbar
-        current_time = time.time()
+        current_time = time.perf_counter()
 
         if self.start_time == 0:
             if self.tracking:
@@ -1112,6 +1257,12 @@ class Model:
             self.state.graph.clear.set(False)    # TODO: Add other measures here.
 
         tb = self.state.toolbar
+        current_time = result.frame_time
+        save_now = False
+        tiff_page_idx = ""
+        t_exact = self.time_elapsed
+        frame_number = int(result.frame_id)
+
         # NOTE(cmo): Condition added to show image when scrolling through image from file
         if self.tracking or self.state.camera.camera_name == "Image from file":
             self.state.diameters = result.diameters
@@ -1124,28 +1275,61 @@ class Model:
             if not self.tracking:
                 return
             
-
-            current_time = result.frame_time
+            if self.start_time == 0:
+                self.start_time = current_time
             time_elapsed = current_time - self.start_time
-            self.time_elapsed = time_elapsed
-
             if self.state.camera.camera_name == "Image from file":
                 self.frames_elapsed += 1
-                self.time_elapsed = self.frames_elapsed
+                time_elapsed = float(self.frames_elapsed)
+
+            is_recording = bool(tb.start_stop.record.get())
+            if is_recording and self._t0 is None:
+                self._handle_record_start()
+
+            if self.state.camera.camera_name == "Image from file":
+                t_exact = max(0.0, time_elapsed)
+            elif self._t0 is not None:
+                t_exact = max(0.0, time.perf_counter() - self._t0)
+            else:
+                t_exact = max(0.0, time_elapsed)
+
+            if self.state.camera.camera_name == "Image from file":
+                self.time_elapsed = t_exact
+            else:
+                self.time_elapsed = t_exact if self._t0 is not None else time_elapsed
 
             diams = self.state.diameters
-            #print("Length of diameter avg: ", len(diams.avg_outer_diam))
-            record_data = self.state.toolbar.start_stop.record.get()
-            rec_interval = self.state.toolbar.acq.rec_interval.get()
+            interval = self._get_record_interval()
+            should_save = bool(
+                is_recording
+                and self._t0 is not None
+                and self._should_save_now(t_exact, interval)
+            )
 
-            if record_data and int(self.time_elapsed) % rec_interval == 0:
-                # Save the raw and rasterised images
-                # ----------------------------------
-                self.save_image(result.raw_im, subdir1="Raw")
-                self.save_image(result.rasterised, subdir2="Result")
+            save_now = False
+            if (
+                should_save
+                and hasattr(self, "output_dir")
+                and self.output_writer is not None
+            ):
+                save_now = True
+                self._tiff_page_index += 1
+                tiff_page_idx = self._tiff_page_index
+                meta = {
+                    "Timestamp": datetime.now().isoformat(),
+                    "TimeElapsed": t_exact,
+                    "FrameNumber": frame_number,
+                    "TiffPage": int(self._tiff_page_index),
+                }
+                self.save_image(result.raw_im, subdir1="Raw", metadata=meta)
+                self.save_image(result.rasterised, subdir2="Result", metadata=meta)
+            else:
+                tiff_page_idx = ""
         else:
             self.state.diameters = None
             diams = self.state.diameters
+            save_now = False
+            tiff_page_idx = ""
             # NOTE(cmo): Drop frames if the UI can't keep up
             if not self.state.cam_show.dirty.get():
                 self.state.cam_show.raw_im_data = result.raw_im
@@ -1180,9 +1364,83 @@ class Model:
             )
 
             tracking = self.state.app.tracking.get()
-            if tracking:
-                self.output_writer.writerow(self.state.measure.get_last_row())
+            if (
+                tracking
+                and self.output_writer is not None
+                and self.write_full_trace
+            ):
+                time_string = time.strftime(
+                    "%H:%M:%S", time.gmtime(max(0.0, self.time_elapsed))
+                )
+                try:
+                    time_exact_str = f"{t_exact:.6f}"
+                except Exception:
+                    time_exact_str = f"{float(self.time_elapsed):.6f}"
+
+                try:
+                    temperature_value = float(tb.data_acq.temperature.get())
+                except Exception:
+                    temperature_value = float("nan")
+                p1_val = (
+                    float(self.state.arduino_controller.measured_pressure_1)
+                    if self.state.arduino_controller and self.state.arduino_controller.measured_pressure_1 is not None
+                    else float("nan")
+                )
+                p2_val = (
+                    float(self.state.arduino_controller.measured_pressure_2)
+                    if self.state.arduino_controller and self.state.arduino_controller.measured_pressure_2 is not None
+                    else float("nan")
+                )
+                pressures = [
+                    val for val in (p1_val, p2_val) if not math.isnan(val)
+                ]
+                avg_pressure_val = float(np.mean(pressures)) if pressures else float("nan")
+                if not pressures:
+                    try:
+                        avg_pressure_val = float(tb.data_acq.pressure.get())
+                    except Exception:
+                        avg_pressure_val = float("nan")
+                try:
+                    set_pressure_val = float(tb.pressure_protocol.set_pressure.get())
+                except Exception:
+                    set_pressure_val = float("nan")
+                try:
+                    caliper_length_val = float(tb.data_acq.caliper_length.get())
+                except Exception:
+                    caliper_length_val = float("nan")
+
+                row = {
+                    "Time (s)": round(self.time_elapsed, 1),
+                    "Time (hh:mm:ss)": time_string,
+                    "Time_s_exact": time_exact_str,
+                    "FrameNumber": frame_number,
+                    "Saved": 1 if save_now else 0,
+                    "TiffPage": tiff_page_idx if save_now else "",
+                    "Outer Diameter": float(diams.avg_outer_diam),
+                    "Inner Diameter": float(diams.avg_inner_diam),
+                    "Table Marker": marker,
+                    "Temperature (oC)": temperature_value,
+                    "Pressure 1 (mmHg)": p1_val,
+                    "Pressure 2 (mmHg)": p2_val,
+                    "Avg Pressure (mmHg)": avg_pressure_val,
+                    "Set Pressure (mmHg)": set_pressure_val,
+                    "Caliper length": caliper_length_val,
+                    "Outer Profiles": json.dumps(list(map(float, diams.outer_diam))),
+                    "Inner Profiles": json.dumps(list(map(float, diams.inner_diam))),
+                    "Outer Profiles Valid": json.dumps(
+                        np.asarray(~diams.od_outliers, dtype=np.int32).tolist()
+                    ),
+                    "Inner Profiles Valid": json.dumps(
+                        np.asarray(~diams.id_outliers, dtype=np.int32).tolist()
+                    ),
+                }
+                self.output_writer.writerow(row)
                 self.output_file.flush()
+
+                if save_now and self.recorded_csv_writer is not None:
+                    self.recorded_csv_writer.writerow(row)
+                    if self.recorded_csv_file is not None:
+                        self.recorded_csv_file.flush()
 
         # NOTE(cmo): Drop frames if the UI can't keep up
         if diams is not None and not self.state.graph.dirty.get():
@@ -1299,15 +1557,17 @@ class Model:
             if self.prev_update == 0:
                 acq_rate = 0.0
             else:
-                acq_rate = 1.0 / (current_time - self.prev_update)
+                delta = max(current_time - self.prev_update, 1e-9)
+                acq_rate = 1.0 / delta
             self.prev_update = current_time
             tb.acq.acq_rate.set(np.round(acq_rate, 2))
-            tb.data_acq.time.set(np.round(time_elapsed, 1))
-            formatted_time = time.strftime("%H:%M:%S", time.gmtime(np.round(time_elapsed, 1)))
+            tb.data_acq.time.set(np.round(self.time_elapsed, 1))
+            formatted_time = time.strftime(
+                "%H:%M:%S", time.gmtime(max(0.0, self.time_elapsed))
+            )
             tb.data_acq.time_string.set(formatted_time)
-            if diams is not None:
-                tb.data_acq.outer_diam.set(np.round(diams.avg_outer_diam, 1))
-                tb.data_acq.inner_diam.set(np.round(diams.avg_inner_diam, 1))
+            tb.data_acq.outer_diam.set(np.round(diams.avg_outer_diam, 1))
+            tb.data_acq.inner_diam.set(np.round(diams.avg_inner_diam, 1))
             ref_diam = self.state.table.ref_diam.get()
             if not np.isnan(ref_diam) and ref_diam != 0.0:
                 outer_percentage = np.round((diams.avg_outer_diam / ref_diam) * 100, 2)
@@ -4793,6 +5053,9 @@ class Controller:
         self.model.start_time = 0.0
         self.model.prev_update = 0.0
         self.model.time_elapsed = 0.0
+        self.model._t0 = None
+        self.model._next_save_time = None
+        self.model._tiff_page_index = -1
         self.model.frame_count = 0
         self.model.state.cam_show.slider_position_manual = 0
         self.model.state.camera.reinitialize()
