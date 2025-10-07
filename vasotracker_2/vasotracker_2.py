@@ -4725,10 +4725,10 @@ class Controller:
         #self.model.setup_output_files(output_path=output_path)
 
         if self.model.configure.registration.register_flag == 0:
-            # Prompt user to register
-            # On successful registration:
-            splash = VasoTrackerSplashScreen(root, self.update_settings)
-            splash.splash_win.focus_force()
+            # Present the registration splash modally so the main window isn’t left unresponsive.
+            show_registration_screen(self)
+        else:
+            root.deiconify()
 
         self.model.process_updates()
 
