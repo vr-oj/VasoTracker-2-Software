@@ -113,7 +113,6 @@ from utilities.VT_Diameter import ImageDiameters, calculate_diameter
 from utilities.VT_NavBar import CustomVTToolbar
 from utilities.VasoTrackerSplashScreen import VasoTrackerSplashScreen
 from utilities.ToolTip import ToolTip
-from utilities.VT_Arduino import Arduino as ArduinoController
 import utilities.VT_Pressure
 from utilities.VT_Pressure import PressureController
 from cameras import Camera, CameraBase
@@ -254,6 +253,8 @@ class DataAcqPaneState:
     time_string: StringVar = field(default_factory=lambda: StringVar(value="00:00:00"))
     temperature: DoubleVar = field(default_factory=DoubleVar)
     pressure: DoubleVar = field(default_factory=DoubleVar)
+    pressure1: DoubleVar = field(default_factory=DoubleVar)
+    pressure2: DoubleVar = field(default_factory=DoubleVar)
     outer_diam: DoubleVar = field(default_factory=DoubleVar)
     inner_diam: DoubleVar = field(default_factory=DoubleVar)
     diam_percent: DoubleVar = field(default_factory=DoubleVar)
@@ -272,11 +273,13 @@ class ImageDimensionsPaneState:
 
 
 @dataclass
-class ServoSettingsState:
-    flag: StringVar = field(default_factory=BooleanVar)
-    device: StringVar = field(default_factory=StringVar)
-    ao_channel: StringVar = field(default_factory=StringVar)
-    set_pressure: IntVar = field(default_factory=IntVar)
+class PressureDeviceSettingsState:
+    device_type: StringVar = field(default_factory=lambda: StringVar(value="None"))
+    port: StringVar = field(default_factory=StringVar)
+    baud: IntVar = field(default_factory=lambda: IntVar(value=115200))
+    ni_device: StringVar = field(default_factory=StringVar)
+    ni_ao_channel: StringVar = field(default_factory=StringVar)
+    ni_scale: DoubleVar = field(default_factory=lambda: DoubleVar(value=0.01))
 
 
 
@@ -310,7 +313,9 @@ class ToolbarState:
     image_dim: ImageDimensionsPaneState = field(
         default_factory=ImageDimensionsPaneState
     )
-    servo: ServoSettingsState = field(default_factory=ServoSettingsState)
+    pressure_device: PressureDeviceSettingsState = field(
+        default_factory=PressureDeviceSettingsState
+    )
     pressure_protocol: PressureProtocolSettingsState = field(
         default_factory=PressureProtocolSettingsState
     )
@@ -498,7 +503,15 @@ class MeasureStore:
         self.temperature.append(temperature)
         self.pressure1.append(p1)
         self.pressure2.append(p2)
-        self.avg_pressure.append(0.5 * (p1 + p2))
+        if np.isnan(p1) and np.isnan(p2):
+            avg_pressure = np.nan
+        elif np.isnan(p1):
+            avg_pressure = p2
+        elif np.isnan(p2):
+            avg_pressure = p1
+        else:
+            avg_pressure = 0.5 * (p1 + p2)
+        self.avg_pressure.append(avg_pressure)
         self.set_pressure.append(set_p)
         self.caliper_length.append(caliper_length)
         self.outer_diam_profile.append(ods)
@@ -610,9 +623,10 @@ class VtState:
     diameters: Optional[ImageDiameters] = None
     measure: MeasureStore = field(default_factory=MeasureStore)
     message: MessageState = field(default_factory=MessageState)
-    arduino_controller: Optional[ArduinoController] = None
     pressure_controller: Optional[PressureController] = None
-    servo: ServoSettingsState = field(default_factory=ServoSettingsState)
+    pressure_device: PressureDeviceSettingsState = field(
+        default_factory=PressureDeviceSettingsState
+    )
     pressure_protocol: PressureProtocolSettingsState = field(default_factory=PressureProtocolSettingsState)
 
 
@@ -850,9 +864,6 @@ class Model:
     def set_pressure_controller(self, pressure_controller):
         self.pressure_controller = pressure_controller
 
-    def set_arduino_controller(self, arduino_controller):
-        self.arduino_controller = arduino_controller
-
     def setup_output_files(self, output_path):
         """Needs to be called before acquiring anything"""
         # Close any previous handles before creating new ones
@@ -1047,6 +1058,11 @@ class Model:
         def cb():
             self.run_acq_thread = False
             self._close_outputs(close_trace=True)
+            if self.pressure_controller is not None:
+                try:
+                    self.pressure_controller.stop()
+                except Exception:
+                    traceback.print_exc()
             if self.state.camera is not None:
                 self.state.camera.shutdown()
 
@@ -1344,18 +1360,40 @@ class Model:
                 self.state.table.dirty_marker.set(False)
 
 
-            # Record measurements
-            # -------------------
+            latest_p1, latest_p2, latest_sp = (None, None, None)
+            if self.pressure_controller is not None:
+                latest_p1, latest_p2, latest_sp = self.pressure_controller.get_latest()
+
+            def _to_float_or_nan(value):
+                try:
+                    if value is None:
+                        return np.nan
+                    return float(value)
+                except Exception:
+                    return np.nan
+
+            p1_store = _to_float_or_nan(latest_p1)
+            p2_store = _to_float_or_nan(latest_p2)
+            pressures_arr = np.asarray([p1_store, p2_store], dtype=float)
+            if np.all(np.isnan(pressures_arr)):
+                avg_store = _to_float_or_nan(tb.data_acq.pressure.get())
+            else:
+                avg_store = float(np.nanmean(pressures_arr))
+
+            set_pressure_store = _to_float_or_nan(latest_sp)
+            if math.isnan(set_pressure_store):
+                set_pressure_store = _to_float_or_nan(tb.pressure_protocol.set_pressure.get())
+
             self.state.measure.append(
                 t=self.time_elapsed,
                 od=diams.avg_outer_diam,
                 id=diams.avg_inner_diam,
                 marker=marker,
-                temperature=tb.data_acq.temperature.get(),
-                pavg = tb.data_acq.pressure.get(),
-                p1 = self.state.arduino_controller.measured_pressure_1 if self.state.arduino_controller.measured_pressure_1 is not None else np.nan,
-                p2 = self.state.arduino_controller.measured_pressure_2 if self.state.arduino_controller.measured_pressure_2 is not None else np.nan,
-                set_p = tb.pressure_protocol.set_pressure.get(),
+                temperature=_to_float_or_nan(tb.data_acq.temperature.get()),
+                pavg=avg_store,
+                p1=p1_store,
+                p2=p2_store,
+                set_p=set_pressure_store,
                 caliper_length=tb.data_acq.caliper_length.get(),
                 ods=diams.outer_diam,
                 ids=diams.inner_diam,
@@ -1381,16 +1419,8 @@ class Model:
                     temperature_value = float(tb.data_acq.temperature.get())
                 except Exception:
                     temperature_value = float("nan")
-                p1_val = (
-                    float(self.state.arduino_controller.measured_pressure_1)
-                    if self.state.arduino_controller and self.state.arduino_controller.measured_pressure_1 is not None
-                    else float("nan")
-                )
-                p2_val = (
-                    float(self.state.arduino_controller.measured_pressure_2)
-                    if self.state.arduino_controller and self.state.arduino_controller.measured_pressure_2 is not None
-                    else float("nan")
-                )
+                p1_val = _to_float_or_nan(latest_p1)
+                p2_val = _to_float_or_nan(latest_p2)
                 pressures = [
                     val for val in (p1_val, p2_val) if not math.isnan(val)
                 ]
@@ -1400,10 +1430,12 @@ class Model:
                         avg_pressure_val = float(tb.data_acq.pressure.get())
                     except Exception:
                         avg_pressure_val = float("nan")
-                try:
-                    set_pressure_val = float(tb.pressure_protocol.set_pressure.get())
-                except Exception:
-                    set_pressure_val = float("nan")
+                set_pressure_val = _to_float_or_nan(latest_sp)
+                if math.isnan(set_pressure_val):
+                    try:
+                        set_pressure_val = float(tb.pressure_protocol.set_pressure.get())
+                    except Exception:
+                        set_pressure_val = float("nan")
                 try:
                     caliper_length_val = float(tb.data_acq.caliper_length.get())
                 except Exception:
@@ -1642,7 +1674,10 @@ class Model:
             traceback.print_exc()
 
         # need to update the timer here
-        if self.state.toolbar.pressure_protocol.pressure_protocol_flag.get() == 1:
+        if (
+            self.pressure_controller is not None
+            and self.state.toolbar.pressure_protocol.pressure_protocol_flag.get() == 1
+        ):
             #update the timer here
             # new if based on timer to set pressure
              #Timenow + interval = next pressure
@@ -1654,14 +1689,11 @@ class Model:
         else:
             pass
 
-        temppres = self.arduino_controller.getData()
-        self.measured_pressure_1, self.measured_pressure_2, self.measured_pressure_avg, self.measured_temperature = self.arduino_controller.sortdata(temppres)
-        if self.measured_temperature:
-            tb.data_acq.temperature.set(np.round(self.measured_temperature, 1))
-        if self.measured_pressure_avg:
-            tb.data_acq.pressure.set(np.round(self.measured_pressure_avg, 1))
-        #tb.data_acq.temperature.set(np.round(self.measured_temperature, 2))
-        #tb.data_acq.temperature.set(np.round(self.measured_temperature, 2))
+        if self.pressure_controller is not None:
+            try:
+                self.pressure_controller.poll_latest()
+            except Exception:
+                traceback.print_exc()
 
         if self.run_acq_thread:
             # NOTE(cmo): This is only set False when we're exiting, at which
@@ -2073,11 +2105,29 @@ class Model:
         if np.isnan(ref_diam) or ref_diam == 0.0:
             percentage = np.nan
             percentage_as_str = "-"
-        caliper_length = self.state.toolbar.data_acq.caliper_length.get()
-        pavg = self.measured_pressure_avg
-        p1 = self.measured_pressure_1
-        p2 = self.measured_pressure_2
-        temp = self.measured_temperature
+        tb = self.state.toolbar
+        caliper_length = tb.data_acq.caliper_length.get()
+
+        latest_p1, latest_p2, latest_sp = (None, None, None)
+        if self.pressure_controller is not None:
+            latest_p1, latest_p2, latest_sp = self.pressure_controller.get_latest()
+
+        def _to_float_or_nan(value):
+            try:
+                if value is None:
+                    return np.nan
+                return float(value)
+            except Exception:
+                return np.nan
+
+        p1 = _to_float_or_nan(latest_p1)
+        p2 = _to_float_or_nan(latest_p2)
+        pressures_arr = np.asarray([p1, p2], dtype=float)
+        if np.all(np.isnan(pressures_arr)):
+            pavg = _to_float_or_nan(tb.data_acq.pressure.get())
+        else:
+            pavg = float(np.nanmean(pressures_arr))
+        temp = _to_float_or_nan(tb.data_acq.temperature.get())
 
         # Get the current number of rows in the table
         current_rows = len(table.rows_to_add) + 1
@@ -2101,17 +2151,17 @@ class Model:
 
         disp_values = [
             str(self.current_table_row),  # Add row number
-            self.state.toolbar.data_acq.time_string.get(),#str(np.round(self.time_elapsed, 2)),
+            self.state.toolbar.data_acq.time_string.get(),
             self.frame_count,
             label,
             str(np.round(diams.avg_outer_diam, 2)),
             percentage_as_str,
             str(np.round(diams.avg_inner_diam, 2)),
             str(caliper_length),
-            str(np.round(pavg, 2)) if p1 is not None else "",
-            str(np.round(p1, 2)) if p1 is not None else "",
-            str(np.round(p2, 2)) if p2 is not None else "",
-            str(np.round(temp, 2)) if p1 is not None else "",
+            str(np.round(pavg, 2)) if not math.isnan(pavg) else "",
+            str(np.round(p1, 2)) if not math.isnan(p1) else "",
+            str(np.round(p2, 2)) if not math.isnan(p2) else "",
+            str(np.round(temp, 2)) if not math.isnan(temp) else "",
         ]
         table.rows_to_add.append(disp_values)
         table.dirty.set(True)
@@ -2940,69 +2990,142 @@ class ImageDimensionsPane(ToolbarPane):
         )
 
 
-class ServoSettingsPane(ToolbarPane):
+class PressureDevicePane(ToolbarPane):
+    DEVICE_OPTIONS = ["None", "Arduino", "NI-DAQ", "Sim"]
+
     def __init__(self, parent, model_vars: VtState):
-        super().__init__(parent, height=175, width=150)
+        super().__init__(parent, height=200, width=200)
         self.parent = parent
         self.model_vars = model_vars
-        sv = model_vars.toolbar.servo
-
-        #self.pack(side=tk.LEFT, anchor=tk.N, padx=3, fill=tk.Y)
+        settings = model_vars.toolbar.pressure_device
 
         make_entry = make_entry_factory(self)
-        self.dev_options = ["", "Dev0", "Dev1", "Dev2"]
-        self.ao_options = ["", "ao0", "ao1", "ao2"]
 
-        # Add a label to display PyDAQmx availability
-
-
-        self.pydaqmx_status_label = ctk.CTkLabel(self, text=f"PyDAQmx Available: {is_pydaqmx_available}", font=(default_font, default_font_size))
-        self.pydaqmx_status_label.grid(row=0, column=0, columnspan=2)
-
-        # Device option menu
-        ctk.CTkLabel(self, text="Device", font=(default_font, default_font_size)).grid(row=1, column=0, sticky=tk.E, )
-        self.dev_entry = make_entry(
-            ttk.OptionMenu,
-            args=(
-                sv.device,
-                sv.device.get(), #self.dev_options[0],
-                *self.dev_options,
-            ),
-            row=1,
-            column=1,
+        self.frame_label = ctk.CTkLabel(
+            self,
+            text="Pressure hardware",
+            font=(default_font, 16, "bold"),
+            fg_color=frame_label_color,
+            height=frame_label_height,
+            text_color="white",
+        )
+        self.frame_label.grid(
+            row=0, column=0, columnspan=2, padx=1, pady=1, sticky="nsew"
         )
 
-        # AO channel option menu
-        ctk.CTkLabel(self, text="ao channel:", font=(default_font, default_font_size)).grid(row=2, column=0, sticky=tk.E)
-        self.ao_entry = make_entry(
-            ttk.OptionMenu,
-            args=(
-                sv.ao_channel,
-                sv.ao_channel.get(),
-                *self.ao_options,
-            ),
+        # Device selector
+        ctk.CTkLabel(
+            self, text="Device", font=(default_font, default_font_size)
+        ).grid(row=1, column=0, sticky=tk.E, padx=2, pady=2)
+        self.device_menu = ctk.CTkOptionMenu(
+            self,
+            variable=settings.device_type,
+            values=self.DEVICE_OPTIONS,
+            width=150,
+        )
+        self.device_menu.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
+
+        # Arduino specific fields
+        ctk.CTkLabel(
+            self, text="Port", font=(default_font, default_font_size)
+        ).grid(row=2, column=0, sticky=tk.E, padx=2, pady=2)
+        self.port_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=settings.port,
+            font=(default_font, default_font_size),
+            width=150,
             row=2,
             column=1,
         )
 
-        # Add traces to the StringVar instances
-        #sv.device.trace_add("write", lambda *args: self.model_vars.pressure_controller.on_option_changed())
-        try:
-            sv.ao_channel.trace_add("write", lambda *args: self.model_vars.pressure_controller.on_option_changed())
-        except:
-            pass
+        ctk.CTkLabel(
+            self, text="Baud", font=(default_font, default_font_size)
+        ).grid(row=3, column=0, sticky=tk.E, padx=2, pady=2)
+        self.baud_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=settings.baud,
+            font=(default_font, default_font_size),
+            width=150,
+            row=3,
+            column=1,
+        )
 
-        # Create a single tooltip instance for the container
+        # NI-DAQ fields
+        ctk.CTkLabel(
+            self, text="NI device", font=(default_font, default_font_size)
+        ).grid(row=4, column=0, sticky=tk.E, padx=2, pady=2)
+        self.ni_device_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=settings.ni_device,
+            font=(default_font, default_font_size),
+            width=150,
+            row=4,
+            column=1,
+        )
+
+        ctk.CTkLabel(
+            self, text="NI AO", font=(default_font, default_font_size)
+        ).grid(row=5, column=0, sticky=tk.E, padx=2, pady=2)
+        self.ni_ao_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=settings.ni_ao_channel,
+            font=(default_font, default_font_size),
+            width=150,
+            row=5,
+            column=1,
+        )
+
+        ctk.CTkLabel(
+            self, text="NI scale", font=(default_font, default_font_size)
+        ).grid(row=6, column=0, sticky=tk.E, padx=2, pady=2)
+        self.ni_scale_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=settings.ni_scale,
+            font=(default_font, default_font_size),
+            width=150,
+            row=6,
+            column=1,
+        )
+
+        self.pydaqmx_status_label = ctk.CTkLabel(
+            self,
+            text=f"PyDAQmx available: {is_pydaqmx_available}",
+            font=(default_font, default_font_size - 1),
+        )
+        self.pydaqmx_status_label.grid(
+            row=7, column=0, columnspan=2, padx=2, pady=(8, 2)
+        )
+
+        # Tooltips
         tooltip = ToolTip(self)
+        tooltip.register(self.device_menu, "Select the active pressure hardware backend.")
+        tooltip.register(self.port_entry, "Serial port for the Arduino-based VasoMoto controller.")
+        tooltip.register(self.baud_entry, "Baud rate used by the Arduino sketch (default 115200).")
+        tooltip.register(self.ni_device_entry, "NI-DAQ device name (e.g., Dev1).")
+        tooltip.register(self.ni_ao_entry, "NI-DAQ analogue output channel (e.g., ao1).")
+        tooltip.register(self.ni_scale_entry, "Voltage scaling factor for NI-DAQ outputs.")
 
-        # Bind tooltips to the buttons
-        tooltips = {
-            self.dev_entry: "Select your NI device.",
-            self.ao_entry: "Set the analogue output channel.",
-        }
+        # React to device selection changes
+        settings.device_type.trace_add("write", self._on_device_change)
+        self._apply_field_states()
 
-        for widget, text in tooltips.items():
-            tooltip.register(widget, text)
+    def _apply_field_states(self) -> None:
+        device = self.model_vars.toolbar.pressure_device.device_type.get().lower()
+        arduino_state = tk.NORMAL if device == "arduino" else tk.DISABLED
+        ni_state = tk.NORMAL if device in ("ni", "ni-daq", "nidaq") else tk.DISABLED
+
+        self.port_entry.configure(state=arduino_state)
+        self.baud_entry.configure(state=arduino_state)
+        self.ni_device_entry.configure(state=ni_state)
+        self.ni_ao_entry.configure(state=ni_state)
+        self.ni_scale_entry.configure(state=ni_state)
+
+    def _on_device_change(self, *args) -> None:
+        self._apply_field_states()
+        controller = self.model_vars.pressure_controller
+        if controller is not None:
+            controller.configure_from_state(start_immediately=True)
+            controller.start()
 
 
 class PressureControlPane(ToolbarPane):
@@ -3381,10 +3504,13 @@ class ToolbarView(ctk.CTkFrame):
         self.panes.append(self.caliper_roi)
         self.caliper_roi.pack(side='left', fill='y')
 
-        if is_pydaqmx_available:
-            self.pressure_control_settings = PressureControlPane(self, state)
-            self.panes.append(self.pressure_control_settings)
-            self.pressure_control_settings.pack(side='left', fill='y')
+        self.pressure_device_settings = PressureDevicePane(self, state)
+        self.panes.append(self.pressure_device_settings)
+        self.pressure_device_settings.pack(side='left', fill='y')
+
+        self.pressure_control_settings = PressureControlPane(self, state)
+        self.panes.append(self.pressure_control_settings)
+        self.pressure_control_settings.pack(side='left', fill='y')
 
 
         self.start_stop = StartStopPane(self, state)
@@ -3401,7 +3527,6 @@ class ToolbarView(ctk.CTkFrame):
         self.source = SourcePane(self, state)
         self.plotting = PlottingPane(self, state)
         self.image_dim = ImageDimensionsPane(self, state)  # Initialise, but do not add to the toolbar
-        self.servo_settings = ServoSettingsPane(self, state)
         self.pressure_protocol_settings = PressureProtocolPane(self, state)
         self.graph = GraphSettingsPane(self, state)
 
@@ -4580,17 +4705,17 @@ class Controller:
         self.camera_controller = CameraController(self.model, self.view)
 
         # Instantiate the PressureController
-        if is_pydaqmx_available:
-            self.pressure_controller = PressureController(self.model, self.view, utilities.VT_Pressure.is_pydaqmx_available())
-        else:
+        try:
+            self.pressure_controller = PressureController(self.model, self.view)
+        except Exception as exc:
+            print("Failed to initialise PressureController:", exc)
             self.pressure_controller = None
         self.model.set_pressure_controller(self.pressure_controller)
         self.model.state.pressure_controller = self.pressure_controller
 
-        # Instantiate the ArduinoController
-        self.arduino_controller = ArduinoController(self)
-        self.model.set_arduino_controller(self.arduino_controller)
-        self.model.state.arduino_controller = self.arduino_controller
+        if self.pressure_controller is not None:
+            self.pressure_controller.configure_from_state(start_immediately=True)
+            self.pressure_controller.start()
 
 
         self.bind_buttons()
@@ -4917,6 +5042,12 @@ class Controller:
             pass
         
     def servo_start(self):
+        if self.model.pressure_controller is None:
+            tmb.showwarning(
+                title="Pressure controller",
+                message="No pressure device is configured; please select a device before starting the protocol.",
+            )
+            return
         current_state = self.model.state.app.auto_pressure.get()
         if current_state == 0:
             if tmb.askokcancel("Start Pressure Protocol", "Are you sure?"):
@@ -4933,6 +5064,8 @@ class Controller:
                 self.model.pressure_controller.reset_protocol()
 
     def servo_stop(self):
+        if self.model.pressure_controller is None:
+            return
         self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.set(0)
 
     def decrease_pressure(self):
@@ -5032,13 +5165,18 @@ class Controller:
 
     def update_set_pressure(self):
         new_pressure_value = self.model.state.toolbar.pressure_protocol.set_pressure.get()
-        self.pressure_controller.adjust_pressure(new_pressure_value, update_table=True)
+        if self.pressure_controller is not None:
+            self.pressure_controller.adjust_pressure(new_pressure_value, update_table=True)
 
     def open_pressure_settings(self):
         self.view.toolbar.pressure_control_settings.start_protocol_button.configure(state=tk.NORMAL)
         self.view.toolbar.pressure_control_settings.start_protocol_button.configure(fg_color='white')
         self.view.toolbar.pressure_control_settings.set_pressure_button.configure(state=tk.NORMAL)
         self.view.toolbar.pressure_control_settings.set_pressure_button.configure(fg_color='white')
+
+        if self.pressure_controller is not None:
+            self.pressure_controller.configure_from_state(start_immediately=True)
+            self.pressure_controller.start()
 
         self.show_daq_settings()
 
@@ -5305,15 +5443,19 @@ class Controller:
         popup.resizable(False, False)
 
         # Add a descriptive label
-        label = ctk.CTkLabel(popup, text="Configure the National Instruments DAQ settings:", font=(default_font, default_font_size))
+        label = ctk.CTkLabel(
+            popup,
+            text="Configure pressure hardware settings:",
+            font=(default_font, default_font_size),
+        )
         label.pack()
 
         # Create a placeholder frame for PlottingFrame using grid()
         frame = tk.Frame(popup)
         frame.pack()
 
-        # Create an instance of the DAQ Settings within the frame
-        self.menu_plotting_pane = ServoSettingsPane(frame, self.model.state)
+        # Create an instance of the hardware settings within the frame
+        self.menu_plotting_pane = PressureDevicePane(frame, self.model.state)
         self.menu_plotting_pane.grid(sticky="nsew")
 
         # Ensure all the widgets are updated before showing the window

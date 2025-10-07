@@ -13,9 +13,13 @@ integration = 20
 threshold = 5.5
 num_threads = 1
 
-[servo]
-device = "Dev1"
-ao_channel = "ao1"
+[pressure]
+device = "Arduino"
+port = "COM5"
+baud = 115200
+ni_device = "Dev1"
+ni_ao_channel = "ao1"
+ni_scale = 0.01
 
 [graph_axes]
 x_min = -1200.0

@@ -136,25 +136,33 @@ class MemorySettings(Configurator):
     
 
 @dataclass
-class ServoSettings(Configurator):
-    
-    device: str = "Dev1"
-    ao_channel: str = "ao1"
+class PressureHardwareSettings(Configurator):
+    device: str = "Arduino"
+    port: str = "COM5"
+    baud: int = 115200
+    ni_device: str = "Dev1"
+    ni_ao_channel: str = "ao1"
+    ni_scale: float = 0.01
 
     def set_values(self, state: "VtState"):
-        servo = state.toolbar.servo
-        servo.device.set(self.device)
-        servo.ao_channel.set(self.ao_channel)
-        print("Device: ", self.device)
+        hardware = state.toolbar.pressure_device
+        hardware.device_type.set(self.device)
+        hardware.port.set(self.port)
+        hardware.baud.set(self.baud)
+        hardware.ni_device.set(self.ni_device)
+        hardware.ni_ao_channel.set(self.ni_ao_channel)
+        hardware.ni_scale.set(self.ni_scale)
 
     @classmethod
     def from_state(cls, state: "VtState"):
-        servo = state.toolbar.servo
-        device = servo.device.get()
-        ao_channel= servo.ao_channel.get()
+        hardware = state.toolbar.pressure_device
         return cls(
-            device=device,
-            ao_channel=ao_channel,
+            device=hardware.device_type.get(),
+            port=hardware.port.get(),
+            baud=hardware.baud.get(),
+            ni_device=hardware.ni_device.get(),
+            ni_ao_channel=hardware.ni_ao_channel.get(),
+            ni_scale=hardware.ni_scale.get(),
         )
 
 
@@ -172,7 +180,6 @@ class PressureControlSettings(Configurator):
         p.pressure_stop.set(self.stop_pressure)
         p.pressure_intvl.set(self.pressure_interval)
         p.time_intvl.set(self.time_interval)
-        s = state.toolbar.servo
         p.set_pressure.set(self.default_pressure)
 
     @classmethod
@@ -182,9 +189,7 @@ class PressureControlSettings(Configurator):
         stop_p = p.pressure_stop.get()
         p_interval = p.pressure_intvl.get()
         t_interval = p.time_intvl.get()
-
-        s = state.toolbar.servo
-        default_pressure = s.set_pressure.get()
+        default_pressure = p.set_pressure.get()
         return cls(
             default_pressure=default_pressure,
             time_interval=t_interval,
@@ -214,7 +219,7 @@ class RegistrationSettings:
 class Config(Configurator):
     acquisition: AcquisitionSettings = field(default_factory=AcquisitionSettings)
     analysis: AnalysisSettings = field(default_factory=AnalysisSettings)
-    servo: ServoSettings = field(default_factory=ServoSettings)
+    pressure: PressureHardwareSettings = field(default_factory=PressureHardwareSettings)
     graph_axes: GraphAxisSettings = field(default_factory=GraphAxisSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
     pressure_control: PressureControlSettings = field(
@@ -229,6 +234,17 @@ class Config(Configurator):
     @classmethod
     def from_file(cls, path: Union[str, Path]) -> "Config":
         data = toml.load(path)
+        if "pressure" not in data:
+            servo_data = data.pop("servo", {}) or {}
+            pressure_device = "NI-DAQ" if servo_data.get("device") else "Arduino"
+            data["pressure"] = {
+                "device": pressure_device,
+                "port": "COM5" if pressure_device == "Arduino" else "",
+                "baud": 115_200,
+                "ni_device": servo_data.get("device", "Dev1"),
+                "ni_ao_channel": servo_data.get("ao_channel", "ao1"),
+                "ni_scale": 0.01,
+            }
         result = dacite.from_dict(data_class=cls, data=data)
         result.path = str(path)
         return result
