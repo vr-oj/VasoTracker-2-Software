@@ -82,20 +82,10 @@ import time
 import traceback
 from typing import Callable, Dict, List, Optional, Tuple, Type
 import webbrowser
-
-# Suppress pygame welcome message if available, otherwise continue without music support
-_stdout_backup = sys.stdout
-_null_stream = open(os.devnull, "w")
-sys.stdout = _null_stream
-try:
-    import pygame  # type: ignore
-except ImportError:
-    pygame = None  # type: ignore
-finally:
-    sys.stdout = _stdout_backup
-    _null_stream.close()
-
-pygame_available = pygame is not None
+# Suppress pygame welcome message
+sys.stdout = open(os.devnull, 'w')
+import pygame
+sys.stdout = sys.__stdout__  # Restore stdout
 
 # Third-party imports
 import random
@@ -127,21 +117,7 @@ import utilities.VT_Pressure
 from utilities.VT_Pressure import PressureController
 from cameras import Camera, CameraBase
 from config import AcquisitionSettings, Config, GraphAxisSettings
-
-try:
-    import customtkinter as ctk
-except ImportError as exc:
-    import tkinter as _tk
-    from tkinter import messagebox as _tmb
-
-    root = _tk.Tk()
-    root.withdraw()
-    _tmb.showerror(
-        "Missing dependency",
-        "The package 'customtkinter' is required. Install it with 'pip install customtkinter' and restart VasoTracker.",
-    )
-    root.destroy()
-    raise SystemExit("customtkinter is required to run VasoTracker") from exc
+import customtkinter as ctk
 import sv_ttk
 
 
@@ -297,19 +273,10 @@ class ImageDimensionsPaneState:
 @dataclass
 class ServoSettingsState:
     flag: StringVar = field(default_factory=BooleanVar)
-    device_type: StringVar = field(default_factory=lambda: StringVar(value="NI"))
     device: StringVar = field(default_factory=StringVar)
     ao_channel: StringVar = field(default_factory=StringVar)
     set_pressure: IntVar = field(default_factory=IntVar)
 
-
-
-@dataclass
-class VasoMotoSettingsState:
-    enabled: BooleanVar = field(default_factory=BooleanVar)
-    control_mode: StringVar = field(default_factory=lambda: StringVar(value="Manual"))
-    serial_port: StringVar = field(default_factory=StringVar)
-    calibration_factor: DoubleVar = field(default_factory=DoubleVar)
 
 
 @dataclass
@@ -343,7 +310,6 @@ class ToolbarState:
         default_factory=ImageDimensionsPaneState
     )
     servo: ServoSettingsState = field(default_factory=ServoSettingsState)
-    vasomoto: VasoMotoSettingsState = field(default_factory=VasoMotoSettingsState)
     pressure_protocol: PressureProtocolSettingsState = field(
         default_factory=PressureProtocolSettingsState
     )
@@ -646,7 +612,6 @@ class VtState:
     arduino_controller: Optional[ArduinoController] = None
     pressure_controller: Optional[PressureController] = None
     servo: ServoSettingsState = field(default_factory=ServoSettingsState)
-    vasomoto: VasoMotoSettingsState = field(default_factory=VasoMotoSettingsState)
     pressure_protocol: PressureProtocolSettingsState = field(default_factory=PressureProtocolSettingsState)
 
 
@@ -875,11 +840,6 @@ class Model:
 
     def set_arduino_controller(self, arduino_controller):
         self.arduino_controller = arduino_controller
-        if self.pressure_controller is not None:
-            try:
-                self.pressure_controller.set_arduino(arduino_controller)
-            except Exception:
-                pass
 
     def setup_output_files(self, output_path):
         """Needs to be called before acquiring anything"""
@@ -919,20 +879,11 @@ class Model:
         tb.analysis.ID.set(True)
         tb.analysis.org.set(False)
 
-        if not tb.servo.device_type.get():
-            tb.servo.device_type.set("NI")
-
         tb.caliper_roi.roi_flag.set("ROI")
 
         tb.pressure_protocol.hold_pressure.set(True)
 
         tb.start_stop.record.set(True)
-
-        if not tb.vasomoto.control_mode.get():
-            tb.vasomoto.control_mode.set("Manual")
-        if tb.vasomoto.calibration_factor.get() in (0, 0.0):
-            tb.vasomoto.calibration_factor.set(1.0)
-        tb.vasomoto.enabled.set(False)
 
     def setup_default_ui_state_loadfile(self):
         tb = self.state.toolbar
@@ -2739,7 +2690,6 @@ class ServoSettingsPane(ToolbarPane):
         #self.pack(side=tk.LEFT, anchor=tk.N, padx=3, fill=tk.Y)
 
         make_entry = make_entry_factory(self)
-        self.device_type_options = ["NI", "Arduino"]
         self.dev_options = ["", "Dev0", "Dev1", "Dev2"]
         self.ao_options = ["", "ao0", "ao1", "ao2"]
 
@@ -2749,26 +2699,8 @@ class ServoSettingsPane(ToolbarPane):
         self.pydaqmx_status_label = ctk.CTkLabel(self, text=f"PyDAQmx Available: {is_pydaqmx_available}", font=(default_font, default_font_size))
         self.pydaqmx_status_label.grid(row=0, column=0, columnspan=2)
 
-        # Controller type option menu
-        current_device_type = sv.device_type.get()
-        if current_device_type not in self.device_type_options:
-            current_device_type = self.device_type_options[0]
-            sv.device_type.set(current_device_type)
-
-        ctk.CTkLabel(self, text="Controller", font=(default_font, default_font_size)).grid(row=1, column=0, sticky=tk.E)
-        self.device_type_entry = make_entry(
-            ttk.OptionMenu,
-            args=(
-                sv.device_type,
-                current_device_type,
-                *self.device_type_options,
-            ),
-            row=1,
-            column=1,
-        )
-
         # Device option menu
-        ctk.CTkLabel(self, text="Device", font=(default_font, default_font_size)).grid(row=2, column=0, sticky=tk.E)
+        ctk.CTkLabel(self, text="Device", font=(default_font, default_font_size)).grid(row=1, column=0, sticky=tk.E, )
         self.dev_entry = make_entry(
             ttk.OptionMenu,
             args=(
@@ -2776,12 +2708,12 @@ class ServoSettingsPane(ToolbarPane):
                 sv.device.get(), #self.dev_options[0],
                 *self.dev_options,
             ),
-            row=2,
+            row=1,
             column=1,
         )
 
         # AO channel option menu
-        ctk.CTkLabel(self, text="ao channel:", font=(default_font, default_font_size)).grid(row=3, column=0, sticky=tk.E)
+        ctk.CTkLabel(self, text="ao channel:", font=(default_font, default_font_size)).grid(row=2, column=0, sticky=tk.E)
         self.ao_entry = make_entry(
             ttk.OptionMenu,
             args=(
@@ -2789,133 +2721,28 @@ class ServoSettingsPane(ToolbarPane):
                 sv.ao_channel.get(),
                 *self.ao_options,
             ),
-            row=3,
+            row=2,
             column=1,
         )
 
         # Add traces to the StringVar instances
+        #sv.device.trace_add("write", lambda *args: self.model_vars.pressure_controller.on_option_changed())
         try:
-            sv.device_type.trace_add("write", lambda *args: self.on_device_type_changed())
-            sv.device.trace_add("write", lambda *args: self.on_servo_option_changed())
-            sv.ao_channel.trace_add("write", lambda *args: self.on_servo_option_changed())
-        except Exception:
+            sv.ao_channel.trace_add("write", lambda *args: self.model_vars.pressure_controller.on_option_changed())
+        except:
             pass
-
-        # Initialise widget states based on the current device type
-        self.update_device_widgets_state(sv.device_type.get())
 
         # Create a single tooltip instance for the container
         tooltip = ToolTip(self)
 
         # Bind tooltips to the buttons
         tooltips = {
-            self.device_type_entry: "Choose whether pressure is controlled via NI hardware or Arduino.",
             self.dev_entry: "Select your NI device.",
             self.ao_entry: "Set the analogue output channel.",
         }
 
         for widget, text in tooltips.items():
             tooltip.register(widget, text)
-
-    def on_device_type_changed(self):
-        device_type = self.model_vars.toolbar.servo.device_type.get()
-        self.update_device_widgets_state(device_type)
-        try:
-            self.model_vars.pressure_controller.on_device_type_changed()
-        except Exception:
-            pass
-
-    def update_device_widgets_state(self, device_type: str):
-        state = tk.NORMAL if device_type == "NI" else tk.DISABLED
-        try:
-            self.dev_entry.configure(state=state)
-            self.ao_entry.configure(state=state)
-        except tk.TclError:
-            # Some themed widgets may not support state changes until fully initialised.
-            pass
-
-    def on_servo_option_changed(self):
-        try:
-            self.model_vars.pressure_controller.on_option_changed()
-        except Exception:
-            pass
-
-
-class VasoMotoSettingsPane(ToolbarPane):
-    def __init__(self, parent, model_vars: VtState):
-        super().__init__(parent, height=200, width=200)
-        self.parent = parent
-        self.model_vars = model_vars
-        sv = model_vars.toolbar.vasomoto
-
-        make_entry = make_entry_factory(self)
-
-        self.frame_label = ctk.CTkLabel(
-            self,
-            text="VasoMoto setup",
-            font=(default_font, 16, "bold"),
-            fg_color=frame_label_color,
-            height=frame_label_height,
-            text_color="white",
-        )
-        self.frame_label.grid(row=0, column=0, columnspan=2, padx=1, pady=1, sticky="nsew")
-
-        self.enable_checkbox = ctk.CTkCheckBox(
-            self,
-            text="Enable VasoMoto",
-            font=(default_font, default_font_size),
-            variable=sv.enabled,
-            checkbox_height=20,
-            checkbox_width=20,
-        )
-        self.enable_checkbox.grid(row=1, column=0, columnspan=2, padx=10, pady=(8, 5), sticky=tk.W)
-
-        mode_options = ["Manual", "Automatic"]
-        current_mode = sv.control_mode.get()
-        if current_mode not in mode_options:
-            current_mode = mode_options[0]
-            sv.control_mode.set(current_mode)
-
-        ctk.CTkLabel(self, text="Mode:", font=(default_font, default_font_size)).grid(
-            row=2, column=0, sticky=tk.E, padx=10, pady=5
-        )
-        self.mode_entry = make_entry(
-            ttk.OptionMenu,
-            args=(sv.control_mode, current_mode, *mode_options),
-            row=2,
-            column=1,
-            sticky=tk.W,
-        )
-
-        ctk.CTkLabel(self, text="Serial port:", font=(default_font, default_font_size)).grid(
-            row=3, column=0, sticky=tk.E, padx=10, pady=5
-        )
-        self.port_entry = make_entry(
-            ctk.CTkEntry,
-            textvariable=sv.serial_port,
-            row=3,
-            column=1,
-            width=120,
-            fg_color="white",
-        )
-
-        ctk.CTkLabel(self, text="Calibration factor:", font=(default_font, default_font_size)).grid(
-            row=4, column=0, sticky=tk.E, padx=10, pady=5
-        )
-        self.calibration_entry = make_entry(
-            ctk.CTkEntry,
-            textvariable=sv.calibration_factor,
-            row=4,
-            column=1,
-            width=120,
-            fg_color="white",
-        )
-
-        tooltip = ToolTip(self)
-        tooltip.register(self.enable_checkbox, "Toggle the VasoMoto controller on or off.")
-        tooltip.register(self.mode_entry, "Choose how VasoMoto responds to control signals.")
-        tooltip.register(self.port_entry, "Specify the serial port VasoMoto should use (e.g., COM3 or /dev/tty.usbmodem).")
-        tooltip.register(self.calibration_entry, "Set the conversion factor between control units and device output.")
 
 
 class PressureControlPane(ToolbarPane):
@@ -3004,7 +2831,7 @@ class PressureControlPane(ToolbarPane):
 
         # Bind tooltips to the buttons
         tooltips = {
-            self.pressure_connect_button: "Connect your pressure controller (NI or Arduino).",
+            self.pressure_connect_button: "Connect your NI board for pressure control.",
             self.start_protocol_button: "Start pressure ramp experiment.",
             self.set_pressure_button: "Set pressure to indicated value.",
             self.pressure_settings_button: "Open pressure protocol settings.",
@@ -3044,12 +2871,8 @@ class PressureControlPane(ToolbarPane):
         #self.set_pressure_button.configure(state=state)
 
     def enable_buttons(self):
-        self.start_protocol_button.configure(state=tk.NORMAL, fg_color="white")
-        self.set_pressure_button.configure(state=tk.NORMAL, fg_color="white")
-
-    def disable_buttons(self):
-        self.start_protocol_button.configure(state=tk.DISABLED, fg_color="#BDC3C7")
-        self.set_pressure_button.configure(state=tk.DISABLED, fg_color="#BDC3C7")
+        self.start_protocol_button.configure(state=tk.NORMAL)
+        self.set_pressure_button.configure(state=tk.NORMAL)
 
 
     def toggle_protocol_button(self):
@@ -3298,9 +3121,10 @@ class ToolbarView(ctk.CTkFrame):
         self.panes.append(self.caliper_roi)
         self.caliper_roi.pack(side='left', fill='y')
 
-        self.pressure_control_settings = PressureControlPane(self, state)
-        self.panes.append(self.pressure_control_settings)
-        self.pressure_control_settings.pack(side='left', fill='y')
+        if is_pydaqmx_available:
+            self.pressure_control_settings = PressureControlPane(self, state)
+            self.panes.append(self.pressure_control_settings)
+            self.pressure_control_settings.pack(side='left', fill='y')
 
 
         self.start_stop = StartStopPane(self, state)
@@ -3383,10 +3207,10 @@ class Menus:
         self.settings_menu.add_command(label="Graph Axes")
         self.settings_menu.add_command(label="Show/Hide Traces")
 
-        self.settings_menu.add_separator()
-        self.settings_menu.add_command(label="DAQ Setup")
-        self.settings_menu.add_command(label="VasoMoto Setup")
-        self.settings_menu.add_command(label="Configure Pressure Protocol")
+        if is_pydaqmx_available:
+            self.settings_menu.add_separator()
+            self.settings_menu.add_command(label="DAQ Setup")
+            self.settings_menu.add_command(label="Configure Pressure Protocol")
 
         notepad_menu = tk.Menu(self.menu_bar, tearoff=0)
         self.notepad_menu = notepad_menu
@@ -3444,13 +3268,6 @@ class Menus:
     
     def play_band(self):
         """Play a random MP3 song from the music/ folder in a background thread."""
-        if not pygame_available:
-            tmb.showinfo(
-                "Music unavailable",
-                "Install pygame to enable in-app music playback.",
-            )
-            return
-
         def play_music_background():
             # Initialize pygame mixer (if not already initialized)
             if not pygame.mixer.get_init():
@@ -4503,11 +4320,10 @@ class Controller:
         self.camera_controller = CameraController(self.model, self.view)
 
         # Instantiate the PressureController
-        self.pressure_controller = PressureController(
-            self.model,
-            self.view,
-            is_pydaqmx_available,
-        )
+        if is_pydaqmx_available:
+            self.pressure_controller = PressureController(self.model, self.view, utilities.VT_Pressure.is_pydaqmx_available())
+        else:
+            self.pressure_controller = None
         self.model.set_pressure_controller(self.pressure_controller)
         self.model.state.pressure_controller = self.pressure_controller
 
@@ -4515,8 +4331,6 @@ class Controller:
         self.arduino_controller = ArduinoController(self)
         self.model.set_arduino_controller(self.arduino_controller)
         self.model.state.arduino_controller = self.arduino_controller
-
-        self.pressure_controller.set_arduino(self.arduino_controller)
 
 
         self.bind_buttons()
@@ -4631,9 +4445,11 @@ class Controller:
             tb.plotting.line_buttons[i].configure(command=partial(self.toggle_line, i))
         '''
 
-        tb.pressure_control_settings.start_protocol_button.configure(command=self.servo_start)
-        tb.pressure_control_settings.add_button.configure(command=self.increase_pressure)
-        tb.pressure_control_settings.minus_button.configure(command=self.decrease_pressure)
+        if is_pydaqmx_available:
+            tb.pressure_control_settings.start_protocol_button.configure(command=self.servo_start)
+            #tb.pressure_protocol_settings.stop_protocol_button.configure(command=self.servo_stop)
+            tb.pressure_control_settings.add_button.configure(command=self.increase_pressure)
+            tb.pressure_control_settings.minus_button.configure(command=self.decrease_pressure)
 
         tb.start_stop.start_button.configure(command=self.start_acq)
         tb.start_stop.track_button.configure(command=self.start_tracking)
@@ -4642,9 +4458,10 @@ class Controller:
         self.view.table.add_button.configure(command=self.add_table_row)
         self.view.table.ref_button.configure(command=self.set_ref_diameter)
 
-        tb.pressure_control_settings.set_pressure_button.configure(command=self.update_set_pressure)
-        tb.pressure_control_settings.pressure_connect_button.configure(command=self.open_pressure_settings)
-        tb.pressure_control_settings.pressure_settings_button.configure(command=self.open_pressure_protocol_settings)
+        if is_pydaqmx_available:
+            tb.pressure_control_settings.set_pressure_button.configure(command=self.update_set_pressure)
+            tb.pressure_control_settings.pressure_connect_button.configure(command=self.open_pressure_settings)
+            tb.pressure_control_settings.pressure_settings_button.configure(command=self.open_pressure_protocol_settings)
 
 
     def bind_checkboxes(self):
@@ -4712,18 +4529,18 @@ class Controller:
         settings_menu.entryconfig(
             settings_menu.index("Show/Hide Traces"), command=self.show_plotting_popup
         )
-        settings_menu = menu.settings_menu
-        settings_menu.entryconfig(
-            settings_menu.index("DAQ Setup"), command=self.show_daq_settings
-        )
-        settings_menu.entryconfig(
-            settings_menu.index("VasoMoto Setup"), command=self.show_vasomoto_settings
-        )
+        if is_pydaqmx_available:
+            # Create the "DAQ Setup" dropdown menu
+            settings_menu = menu.settings_menu
+            settings_menu.entryconfig(
+                settings_menu.index("DAQ Setup"), command=self.show_daq_settings
+            )
 
-        settings_menu = menu.settings_menu
-        settings_menu.entryconfig(
-            settings_menu.index("Configure Pressure Protocol"), command=self.show_pressure_settings
-        )
+            # Create the "Pressure Protocol" dropdown menu
+            settings_menu = menu.settings_menu
+            settings_menu.entryconfig(
+                settings_menu.index("Configure Pressure Protocol"), command=self.show_pressure_settings
+            )
 
         # Create the "Notepad"
         notepad_menu = menu.notepad_menu
@@ -4958,9 +4775,12 @@ class Controller:
         self.pressure_controller.adjust_pressure(new_pressure_value, update_table=True)
 
     def open_pressure_settings(self):
+        self.view.toolbar.pressure_control_settings.start_protocol_button.configure(state=tk.NORMAL)
+        self.view.toolbar.pressure_control_settings.start_protocol_button.configure(fg_color='white')
+        self.view.toolbar.pressure_control_settings.set_pressure_button.configure(state=tk.NORMAL)
+        self.view.toolbar.pressure_control_settings.set_pressure_button.configure(fg_color='white')
+
         self.show_daq_settings()
-        if self.pressure_controller is not None:
-            self.pressure_controller.on_option_changed()
 
     def open_pressure_protocol_settings(self):
         self.show_pressure_settings()
@@ -5212,7 +5032,7 @@ class Controller:
     def show_daq_settings(self):
         # Create the popup window
         popup = tk.Toplevel(root)
-        popup.title("Pressure Control Settings")
+        popup.title("NI DAQ Settings:")
 
         # Set the window icon to be the same as the main window
         icon_path = os.path.join(images_folder, 'vt_icon.ICO')  # Path to the icon file
@@ -5222,11 +5042,7 @@ class Controller:
         popup.resizable(False, False)
 
         # Add a descriptive label
-        label = ctk.CTkLabel(
-            popup,
-            text="Configure pressure control hardware settings:",
-            font=(default_font, default_font_size),
-        )
+        label = ctk.CTkLabel(popup, text="Configure the National Instruments DAQ settings:", font=(default_font, default_font_size))
         label.pack()
 
         # Create a placeholder frame for PlottingFrame using grid()
@@ -5244,33 +5060,6 @@ class Controller:
         popup.attributes('-topmost', True)
 
         # Now show the window after everything is fully generated
-        popup.deiconify()
-
-
-    def show_vasomoto_settings(self):
-        popup = tk.Toplevel(root)
-        popup.title("VasoMoto Settings")
-
-        icon_path = os.path.join(images_folder, 'vt_icon.ICO')
-        popup.iconbitmap(icon_path)
-
-        popup.resizable(False, False)
-
-        label = ctk.CTkLabel(
-            popup,
-            text="Configure VasoMoto control settings:",
-            font=(default_font, default_font_size),
-        )
-        label.pack()
-
-        frame = tk.Frame(popup)
-        frame.pack()
-
-        self.vasomoto_settings_pane = VasoMotoSettingsPane(frame, self.model.state)
-        self.vasomoto_settings_pane.grid(sticky="nsew")
-
-        popup.update_idletasks()
-        popup.attributes('-topmost', True)
         popup.deiconify()
 
 
@@ -5445,10 +5234,7 @@ if __name__ == "__main__":
         mmc = CMMCorePlus(adapter_paths=[mm_path, SYS32_PATH, BASLER_PATH, BASLER_PATH2])
 
     if not is_pydaqmx_available:
-        tmb.showinfo(
-            "Warning",
-            "niDAQmx not found. NI-based pressure control will be unavailable, but you can still use Arduino mode.",
-        )
+        tmb.showinfo("Warning", "niDAQmx not found. Please install to enable automatic pressure control.")
 
     # **Schedule Controller Initialization on the Main Thread (No Freezing)**
     root.after(2000, initialize_controller)  # Start loading the app after splash screen
@@ -5536,10 +5322,7 @@ if __name__ == "__main__":
         mmc = CMMCorePlus(adapter_paths=[mm_path, SYS32_PATH, BASLER_PATH, BASLER_PATH2])
 
     if not is_pydaqmx_available:
-        tmb.showinfo(
-            "Warning",
-            "niDAQmx not found. NI-based pressure control will be unavailable, but you can still use Arduino mode.",
-        )
+        tmb.showinfo("Warning", "niDAQmx not found. Please install to enable automatic pressure control.")
 
     # Get the text font used by text entry widgets and text boxes
     text_font = font.nametofont("TkTextFont")

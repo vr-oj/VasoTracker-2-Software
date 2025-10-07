@@ -137,13 +137,12 @@ class MemorySettings(Configurator):
 
 @dataclass
 class ServoSettings(Configurator):
-    device_type: str = "NI"
+    
     device: str = "Dev1"
     ao_channel: str = "ao1"
 
     def set_values(self, state: "VtState"):
         servo = state.toolbar.servo
-        servo.device_type.set(self.device_type)
         servo.device.set(self.device)
         servo.ao_channel.set(self.ao_channel)
         print("Device: ", self.device)
@@ -151,46 +150,11 @@ class ServoSettings(Configurator):
     @classmethod
     def from_state(cls, state: "VtState"):
         servo = state.toolbar.servo
-        device_type = servo.device_type.get()
         device = servo.device.get()
         ao_channel= servo.ao_channel.get()
         return cls(
-            device_type=device_type,
             device=device,
             ao_channel=ao_channel,
-        )
-
-
-@dataclass
-class VasoMotoSettings(Configurator):
-    enabled: bool = False
-    control_mode: str = "Manual"
-    serial_port: str = ""
-    calibration_factor: float = 1.0
-
-    def set_values(self, state: "VtState"):
-        vm = state.toolbar.vasomoto
-        vm.enabled.set(self.enabled)
-        vm.control_mode.set(self.control_mode)
-        vm.serial_port.set(self.serial_port)
-        vm.calibration_factor.set(self.calibration_factor)
-
-    @classmethod
-    def from_state(cls, state: "VtState"):
-        vm = state.toolbar.vasomoto
-        enabled = bool(vm.enabled.get())
-        control_mode = vm.control_mode.get() or "Manual"
-        serial_port = vm.serial_port.get()
-        calibration_factor = vm.calibration_factor.get()
-        try:
-            calibration_value = float(calibration_factor)
-        except (TypeError, ValueError):
-            calibration_value = 1.0
-        return cls(
-            enabled=enabled,
-            control_mode=control_mode,
-            serial_port=serial_port,
-            calibration_factor=calibration_value,
         )
 
 
@@ -251,7 +215,6 @@ class Config(Configurator):
     acquisition: AcquisitionSettings = field(default_factory=AcquisitionSettings)
     analysis: AnalysisSettings = field(default_factory=AnalysisSettings)
     servo: ServoSettings = field(default_factory=ServoSettings)
-    vasomoto: VasoMotoSettings = field(default_factory=VasoMotoSettings)
     graph_axes: GraphAxisSettings = field(default_factory=GraphAxisSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
     pressure_control: PressureControlSettings = field(

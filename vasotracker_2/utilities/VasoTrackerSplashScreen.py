@@ -16,18 +16,7 @@ import tkinter.messagebox as tmb
 import tkinter.filedialog as tkFileDialog
 from tkinter import ttk 
 from tkinter.font import Font
-
-try:
-    import customtkinter as ctk
-except ImportError as exc:
-    root = tk.Tk()
-    root.withdraw()
-    tmb.showerror(
-        "Missing dependency",
-        "The package 'customtkinter' is required. Install it with 'pip install customtkinter' and restart VasoTracker.",
-    )
-    root.destroy()
-    raise SystemExit("customtkinter is required to display the splash screen") from exc
+import customtkinter as ctk
 import webbrowser
 from PIL import Image, ImageTk #convert cv2 image to tkinter
 E = tk.E
