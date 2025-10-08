@@ -89,6 +89,23 @@ class AnalysisSettings(Configurator):
 
 
 @dataclass
+class SourceSettings(Configurator):
+    file_fps: float = 1.0
+
+    def set_values(self, state: "VtState"):
+        state.toolbar.source.file_fps.set(self.file_fps)
+
+    @classmethod
+    def from_state(cls, state: "VtState"):
+        source = state.toolbar.source
+        try:
+            fps = float(source.file_fps.get())
+        except Exception:
+            fps = 1.0
+        return cls(file_fps=fps)
+
+
+@dataclass
 class GraphAxisSettings(Configurator):
     x_min: float = -1200.0
     x_max: float = 0.0
@@ -219,6 +236,7 @@ class RegistrationSettings:
 class Config(Configurator):
     acquisition: AcquisitionSettings = field(default_factory=AcquisitionSettings)
     analysis: AnalysisSettings = field(default_factory=AnalysisSettings)
+    source: SourceSettings = field(default_factory=SourceSettings)
     pressure: PressureHardwareSettings = field(default_factory=PressureHardwareSettings)
     graph_axes: GraphAxisSettings = field(default_factory=GraphAxisSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)

@@ -13,8 +13,11 @@ integration = 20
 threshold = 5.5
 num_threads = 1
 
+[source]
+file_fps = 1.0
+
 [pressure]
-device = "None"
+device = "Sim"
 port = "COM5"
 baud = 115200
 ni_device = "Dev1"

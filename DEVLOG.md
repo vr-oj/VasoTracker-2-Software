@@ -1,0 +1,3 @@
+- [CS] File-mode FPS fix; interval now interpreted in seconds.
+- [Fix] Call is_pydaqmx_available().
+- [QA] Sim pressure device polled every frame; values logged.

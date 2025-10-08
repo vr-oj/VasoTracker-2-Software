@@ -113,8 +113,7 @@ from utilities.VT_Diameter import ImageDiameters, calculate_diameter
 from utilities.VT_NavBar import CustomVTToolbar
 from utilities.VasoTrackerSplashScreen import VasoTrackerSplashScreen
 from utilities.ToolTip import ToolTip
-import utilities.VT_Pressure
-from utilities.VT_Pressure import PressureController
+from utilities.VT_Pressure import PressureController, is_pydaqmx_available
 from cameras import Camera, CameraBase
 from config import AcquisitionSettings, Config, GraphAxisSettings
 import customtkinter as ctk
@@ -128,9 +127,7 @@ try:
 except:
     micromanager_available = False
 
-is_pydaqmx_available = utilities.VT_Pressure.is_pydaqmx_available()#False
-
-print("Is PYDAQMX = ", is_pydaqmx_available)
+print("Is PYDAQMX = ", is_pydaqmx_available())
 
 # Constants
 SYS32_PATH = "C:/WINDOWS/SYSTEM32/DRIVERs/"
@@ -179,6 +176,7 @@ class SourcePaneState:
     path: StringVar = field(default_factory=StringVar)
     settings: StringVar = field(default_factory=StringVar)
     filename: StringVar = field(default_factory=StringVar)
+    file_fps: DoubleVar = field(default_factory=lambda: DoubleVar(value=1.0))
 
 
 @dataclass
@@ -989,6 +987,15 @@ class Model:
             return 0.0
         return max(0.0, interval)
 
+    def _get_file_fps(self) -> float:
+        try:
+            fps = float(self.state.toolbar.source.file_fps.get())
+        except Exception:
+            return 1.0
+        if fps <= 0:
+            return 1.0
+        return fps
+
     def _handle_record_start(self) -> None:
         self._tiff_page_index = -1
         self._t0 = time.perf_counter()
@@ -1294,22 +1301,25 @@ class Model:
             if self.start_time == 0:
                 self.start_time = current_time
             time_elapsed = current_time - self.start_time
-            if self.state.camera.camera_name == "Image from file":
+            file_mode = self.state.camera.camera_name == "Image from file"
+            if file_mode:
                 self.frames_elapsed += 1
-                time_elapsed = float(self.frames_elapsed)
 
             is_recording = bool(tb.start_stop.record.get())
             if is_recording and self._t0 is None:
                 self._handle_record_start()
 
-            if self.state.camera.camera_name == "Image from file":
-                t_exact = max(0.0, time_elapsed)
+            if file_mode:
+                t_exact = max(
+                    0.0, float(self.frames_elapsed) / self._get_file_fps()
+                )
+                time_elapsed = t_exact
             elif self._t0 is not None:
                 t_exact = max(0.0, time.perf_counter() - self._t0)
             else:
                 t_exact = max(0.0, time_elapsed)
 
-            if self.state.camera.camera_name == "Image from file":
+            if file_mode:
                 self.time_elapsed = t_exact
             else:
                 self.time_elapsed = t_exact if self._t0 is not None else time_elapsed
@@ -1689,11 +1699,11 @@ class Model:
         else:
             pass
 
-        if self.pressure_controller is not None:
+        if getattr(self, "pressure_controller", None):
             try:
                 self.pressure_controller.poll_latest()
             except Exception:
-                traceback.print_exc()
+                pass
 
         if self.run_acq_thread:
             # NOTE(cmo): This is only set False when we're exiting, at which
@@ -1759,8 +1769,9 @@ class Model:
                     '''
                     Load an image and have it show. The image will not be analysed until the analyse button is pressed and self.tracking is True.
                     '''
-                    slider_img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
-                    slider_index = int(self.state.cam_show.slider_position_manual)
+                    slider_pos = self.state.cam_show.slider_position_manual.get()
+                    slider_img = camera.get_specific_frame(slider_pos)
+                    slider_index = int(slider_pos)
                     self.queue.put(slider_img)
                     self.queue.empty()
                     # NOTE(cmo): Don't spin super fast on the same frame in this state!
@@ -1798,7 +1809,7 @@ class Model:
                         self.state.cam_show.slider_change_state.set(True)
                     
                     # Show the images as we analyse them
-                    slider_img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
+                    slider_img = camera.get_specific_frame(self.state.cam_show.slider_position_manual.get())
                     self.queue.put(slider_img)
                     self.queue.empty()
 
@@ -1830,8 +1841,9 @@ class Model:
                 '''
                 camera = self.state.camera
                 if self.state.camera.camera_name == "Image from file":
-                    slider_img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
-                    slider_index = int(self.state.cam_show.slider_position_manual) - 1
+                    slider_pos = self.state.cam_show.slider_position_manual.get()
+                    slider_img = camera.get_specific_frame(slider_pos)
+                    slider_index = int(slider_pos) - 1
 
                     self.state.toolbar.data_acq.outer_diam.set(np.round(self.state.measure.outer_diam[slider_index], 1))
                     self.state.toolbar.data_acq.inner_diam.set(np.round(self.state.measure.inner_diam[slider_index], 1))
@@ -1881,7 +1893,8 @@ class Model:
         try:
             self.state.camera = Camera(cam_name, self.mmc, self.state, self.configure)
             image_dim = self.state.toolbar.image_dim
-            if cam_name == "Image from file":
+            active_camera_name = getattr(self.state.camera, "camera_name", str(cam_name or ""))
+            if active_camera_name.lower() == "image from file".lower():
                 w, h, l = self.state.camera.get_camera_dims()
                 image_dim.file_length.set(l)
                 self.state.cam_show.slider_length_dirty.set(True)
@@ -2236,6 +2249,36 @@ class SourcePane(ToolbarPane):
             fg_color = entry_disabled_color,
             width=300,
         )
+
+        self.file_fps_label = ctk.CTkLabel(
+            self,
+            text="File FPS:",
+            font=(default_font, default_font_size),
+        )
+        self.file_fps_label.grid(row=3, column=0, sticky=tk.E)
+        self.file_fps_entry = make_entry(
+            ctk.CTkEntry,
+            row=3,
+            column=1,
+            textvariable=sv.file_fps,
+            font=(default_font, default_font_size),
+            width=80,
+            sticky=tk.W,
+        )
+
+        self.model_vars.toolbar.acq.camera.trace_add(
+            "write", self._update_file_fps_visibility
+        )
+        self._update_file_fps_visibility()
+
+    def _update_file_fps_visibility(self, *args):
+        show = self.model_vars.toolbar.acq.camera.get() == "Image from file"
+        widgets = (self.file_fps_label, self.file_fps_entry)
+        for widget in widgets:
+            if show:
+                widget.grid()
+            else:
+                widget.grid_remove()
 
 
 class AcquisitionSettingsPane(ToolbarPane):
@@ -3089,7 +3132,7 @@ class PressureDevicePane(ToolbarPane):
 
         self.pydaqmx_status_label = ctk.CTkLabel(
             self,
-            text=f"PyDAQmx available: {is_pydaqmx_available}",
+            text=f"PyDAQmx available: {is_pydaqmx_available()}",
             font=(default_font, default_font_size - 1),
         )
         self.pydaqmx_status_label.grid(
@@ -3614,7 +3657,7 @@ class Menus:
         self.settings_menu.add_separator()
         self.settings_menu.add_command(label="Pressure Hardware")
 
-        if is_pydaqmx_available:
+        if is_pydaqmx_available():
             self.settings_menu.add_command(label="Configure Pressure Protocol")
 
         notepad_menu = tk.Menu(self.menu_bar, tearoff=0)
@@ -4235,7 +4278,7 @@ class CameraFrame(ctk.CTkFrame):
             self.slider.configure(state="normal")
 
         current_value = self.slider.get()
-        self.state_vars.cam_show.slider_position_manual = current_value
+        self.state_vars.cam_show.slider_position_manual.set(current_value)
 
         '''
         When loading from a file only show the vertical indicator on the graph when we are not tracking and not acquiring i.e., only after the analysis has ran.
@@ -4850,7 +4893,7 @@ class Controller:
             tb.plotting.line_buttons[i].configure(command=partial(self.toggle_line, i))
         '''
 
-        if is_pydaqmx_available:
+        if is_pydaqmx_available():
             tb.pressure_control_settings.start_protocol_button.configure(command=self.servo_start)
             #tb.pressure_protocol_settings.stop_protocol_button.configure(command=self.servo_stop)
             tb.pressure_control_settings.add_button.configure(command=self.increase_pressure)
@@ -4863,7 +4906,7 @@ class Controller:
         self.view.table.add_button.configure(command=self.add_table_row)
         self.view.table.ref_button.configure(command=self.set_ref_diameter)
 
-        if is_pydaqmx_available:
+        if is_pydaqmx_available():
             tb.pressure_control_settings.set_pressure_button.configure(command=self.update_set_pressure)
             tb.pressure_control_settings.pressure_connect_button.configure(command=self.open_pressure_settings)
             tb.pressure_control_settings.pressure_settings_button.configure(command=self.open_pressure_protocol_settings)
@@ -4937,7 +4980,7 @@ class Controller:
         settings_menu.entryconfig(
             settings_menu.index("Pressure Hardware"), command=self.show_pressure_hardware_popup
         )
-        if is_pydaqmx_available:
+        if is_pydaqmx_available():
             # Create the "Pressure Protocol" dropdown menu
             settings_menu = menu.settings_menu
             settings_menu.entryconfig(
@@ -5212,7 +5255,7 @@ class Controller:
         self.model._next_save_time = None
         self.model._tiff_page_index = -1
         self.model.frame_count = 0
-        self.model.state.cam_show.slider_position_manual = 0
+        self.model.state.cam_show.slider_position_manual.set(0)
         self.model.state.camera.reinitialize()
         self.model.state.frames_elapsed = 0
 
@@ -5655,7 +5698,7 @@ if __name__ == "__main__":
     else:
         mmc = CMMCorePlus(adapter_paths=[mm_path, SYS32_PATH, BASLER_PATH, BASLER_PATH2])
 
-    if not is_pydaqmx_available:
+    if not is_pydaqmx_available():
         tmb.showinfo("Warning", "niDAQmx not found. Please install to enable automatic pressure control.")
 
     # **Schedule Controller Initialization on the Main Thread (No Freezing)**
@@ -5743,7 +5786,7 @@ if __name__ == "__main__":
     else:
         mmc = CMMCorePlus(adapter_paths=[mm_path, SYS32_PATH, BASLER_PATH, BASLER_PATH2])
 
-    if not is_pydaqmx_available:
+    if not is_pydaqmx_available():
         tmb.showinfo("Warning", "niDAQmx not found. Please install to enable automatic pressure control.")
 
     # Get the text font used by text entry widgets and text boxes
