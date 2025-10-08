@@ -17,8 +17,8 @@ num_threads = 1
 file_fps = 1.0
 
 [pressure]
-device = "Sim"
-port = "COM5"
+device = "Arduino"
+port = "COM3"
 baud = 115200
 ni_device = "Dev1"
 ni_ao_channel = "ao1"
