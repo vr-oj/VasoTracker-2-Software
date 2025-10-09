@@ -107,7 +107,7 @@ class ArduinoPressureDevice:
 
     Serial protocol (ASCII, newline terminated):
       PC -> Arduino: 'PING\\n' | 'START\\n' | 'STOP\\n'
-        Setpoint: 'SET:<mmHg>\\n' (mirrored to '<mmHg>' by the serial helper for legacy firmware)
+        Setpoint: 'SET:<mmHg>\\n' (modern) and '<mmHg>\\n' (legacy VasoMoto firmware)
       Arduino -> PC: 'P1:<v>,P2:<v>,SET:<v>\\n' (modern) or '<P1:<v>;P2:<v>>' (legacy)
     """
 
@@ -137,7 +137,7 @@ class ArduinoPressureDevice:
         self._pattern_legacy = re.compile(
             r"<\s*P1:(-?\d+\.?\d*)\s*[,;]\s*P2:(-?\d+\.?\d*)\s*(?:[,;]\s*SET:(-?\d+\.?\d*))?\s*>"
         )
-        self._last_sent_set_mmHg: Optional[float] = None
+        self._last_command_sp: Optional[float] = None
         self._interval = 1.0 / max(1.0, stream_rate_hz)
 
     def start(self) -> None:
@@ -176,9 +176,13 @@ class ArduinoPressureDevice:
             return
 
         v = max(0.0, float(value_mmHg))
-        self._last_sent_set_mmHg = v
+        self._last_command_sp = v
         try:
             self.arduino.sendData(f"SET:{v:.2f}\n")
+        except Exception:
+            pass
+        try:
+            self.arduino.sendData(f"<{int(round(v))}>\n")
         except Exception:
             pass
 
@@ -211,7 +215,7 @@ class ArduinoPressureDevice:
             if match or match_legacy:
                 if sp is None:
                     previous = self._latest[2]
-                    sp = previous if previous is not None else self._last_sent_set_mmHg
+                    sp = previous if previous is not None else self._last_command_sp
                 self._latest = (p1, p2, sp)
 
     def read_latest(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
