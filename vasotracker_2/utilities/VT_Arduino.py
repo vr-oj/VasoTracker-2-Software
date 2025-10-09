@@ -18,6 +18,7 @@ pulling in UI dependencies or platform checks.
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from typing import Generator, Optional
 
@@ -58,6 +59,7 @@ class Arduino:
         self.serial: Optional[serial.SerialBase] = None
         self._last_error: Optional[Exception] = None
         self._error_notified: bool = False
+        self._last_set_mmHg: Optional[float] = None
 
         if auto_connect:
             self.connect()
@@ -112,7 +114,7 @@ class Arduino:
 
     def sendData(self, text: str) -> None:
         """
-        Send ASCII text to the Arduino, appending a newline if necessary.
+        Send ASCII text to the Arduino and mirror setpoint commands to the legacy format.
 
         The method name is retained for backwards compatibility with legacy
         code that previously called into this module.
@@ -120,11 +122,31 @@ class Arduino:
         if not self.serial or not self.serial.is_open:
             raise RuntimeError("Serial port is not open. Call `connect()` first.")
 
-        if not text.endswith("\n"):
-            text += "\n"
-        payload = text.encode("ascii", errors="ignore")
-        self.serial.write(payload)
-        self.serial.flush()
+        try:
+            self.serial.write(text.encode("utf-8"))
+            self.serial.flush()
+        except Exception as exc:
+            print("Serial write error:", exc)
+            return
+
+        match = re.search(
+            r"(?:^|\b)(?:SET|SP|P|PRESSURE)\s*[:= ]\s*(-?\d+(?:\.\d+)?)", text, flags=re.I
+        )
+        if not match:
+            return
+
+        try:
+            value = float(match.group(1))
+        except (TypeError, ValueError):
+            return
+
+        legacy = f"<{int(round(value))}>"
+        try:
+            self.serial.write(legacy.encode("utf-8"))
+            self.serial.flush()
+            self._last_set_mmHg = value
+        except Exception as exc:
+            print("Legacy bridge write error:", exc)
 
     def readline(self, timeout: float = 0.1) -> Optional[str]:
         """
