@@ -136,6 +136,9 @@ class ArduinoPressureDevice:
         self._interval = 1.0 / max(1.0, stream_rate_hz)
 
     def start(self) -> None:
+        if not getattr(self.arduino, "is_connected", False):
+            return
+
         self._stop_evt.clear()
         try:
             self.arduino.sendData("PING\n")
@@ -164,11 +167,17 @@ class ArduinoPressureDevice:
             self._thread = None
 
     def set_pressure(self, value_mmHg: float) -> None:
+        if not getattr(self.arduino, "is_connected", False):
+            return
+
         v = max(0.0, float(value_mmHg))
         self.arduino.sendData(f"SET:{v:.2f}\n")
 
     def _reader_loop(self) -> None:
         while not self._stop_evt.is_set():
+            if not getattr(self.arduino, "is_connected", False):
+                time.sleep(self._interval)
+                continue
             try:
                 line = self.arduino.readline(timeout=self._interval)
             except Exception:
@@ -221,4 +230,3 @@ class NIDaqPressureDevice:
     def read_latest(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         # Keeping async reads optional – callers may supply ai_task to refresh.
         return self._latest
-

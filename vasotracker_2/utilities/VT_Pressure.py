@@ -181,6 +181,17 @@ class PressureController:
             self._set_device(NullPressureDevice(), "none")
             return
 
+        if not arduino.is_connected:
+            if not getattr(arduino, "error_notified", False):
+                last_error = getattr(arduino, "last_error", None)
+                if last_error is not None:
+                    tmb.showinfo(
+                        "Arduino connection failed",
+                        f"Unable to open serial port '{port}':\n{last_error}",
+                    )
+            self._set_device(NullPressureDevice(), "none")
+            return
+
         device = ArduinoPressureDevice(arduino)
         self._set_device(device, "arduino", arduino=arduino)
         if start_immediately:

@@ -56,6 +56,8 @@ class Arduino:
         self.baud = baud
         self.timeout = timeout
         self.serial: Optional[serial.SerialBase] = None
+        self._last_error: Optional[Exception] = None
+        self._error_notified: bool = False
 
         if auto_connect:
             self.connect()
@@ -65,14 +67,21 @@ class Arduino:
         if self.serial and self.serial.is_open:
             return
 
-        if self.port.startswith(("loop://", "spy://", "rfc2217://")):
-            self.serial = serial.serial_for_url(
-                self.port, baudrate=self.baud, timeout=self.timeout
-            )
-        else:
-            self.serial = serial.Serial(
-                self.port, baudrate=self.baud, timeout=self.timeout
-            )
+        try:
+            if self.port.startswith(("loop://", "spy://", "rfc2217://")):
+                self.serial = serial.serial_for_url(
+                    self.port, baudrate=self.baud, timeout=self.timeout
+                )
+            else:
+                self.serial = serial.Serial(
+                    self.port, baudrate=self.baud, timeout=self.timeout
+                )
+        except Exception as exc:
+            self._handle_connection_failure(exc)
+            return
+
+        self._last_error = None
+        self._error_notified = False
 
         # Flush any stale bytes to start with a clean buffer.
         self.serial.reset_input_buffer()
@@ -92,6 +101,14 @@ class Arduino:
     @property
     def is_connected(self) -> bool:
         return bool(self.serial and self.serial.is_open)
+
+    @property
+    def last_error(self) -> Optional[Exception]:
+        return self._last_error
+
+    @property
+    def error_notified(self) -> bool:
+        return self._error_notified
 
     def sendData(self, text: str) -> None:
         """
@@ -138,6 +155,23 @@ class Arduino:
             return None
         return line.decode("ascii", errors="ignore")
 
+    def _handle_connection_failure(self, exc: Exception) -> None:
+        self.serial = None
+        self._last_error = exc
+        message = (
+            f"Unable to open serial port '{self.port}':\n{exc}\n\n"
+            "Tip: close Arduino Serial Monitor or any app using the port."
+        )
+        try:
+            # Lazy import keeps this utility usable in headless contexts.
+            from tkinter import messagebox
+
+            messagebox.showerror("Arduino connection failed", message)
+            self._error_notified = True
+        except Exception:
+            print("Arduino connection failed:", message)
+            self._error_notified = True
+
 
 @contextmanager
 def arduino_session(
@@ -149,4 +183,3 @@ def arduino_session(
         yield device
     finally:
         device.close()
-
