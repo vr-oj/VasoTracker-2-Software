@@ -106,8 +106,9 @@ class ArduinoPressureDevice:
     Arduino-based implementation that speaks the minimal VasoMoto protocol.
 
     Serial protocol (ASCII, newline terminated):
-      PC -> Arduino: 'PING\\n' | 'START\\n' | 'STOP\\n' | 'SET:<mmHg>\\n'
-      Arduino -> PC: 'P1:<v>,P2:<v>,SET:<v>\\n'
+      PC -> Arduino: 'PING\\n' | 'START\\n' | 'STOP\\n'
+        Setpoint: 'SET:<mmHg>\\n' (modern) and '<mmHg>\\n' (legacy VasoMoto firmware)
+      Arduino -> PC: 'P1:<v>,P2:<v>,SET:<v>\\n' (modern) or '<P1:<v>;P2:<v>>' (legacy)
     """
 
     def __init__(self, arduino, stream_rate_hz: float = 20.0) -> None:
@@ -131,8 +132,12 @@ class ArduinoPressureDevice:
             None,
         )
         self._pattern = re.compile(
-            r"P1:(-?\d+\.?\d*),P2:(-?\d+\.?\d*),SET:(-?\d+\.?\d*)"
+            r"P1:(-?\d+\.?\d*),\s*P2:(-?\d+\.?\d*),\s*SET:(-?\d+\.?\d*)"
         )
+        self._pattern_legacy = re.compile(
+            r"<\s*P1:(-?\d+\.?\d*)\s*[,;]\s*P2:(-?\d+\.?\d*)\s*(?:[,;]\s*SET:(-?\d+\.?\d*))?\s*>"
+        )
+        self._last_command_sp: Optional[float] = None
         self._interval = 1.0 / max(1.0, stream_rate_hz)
 
     def start(self) -> None:
@@ -171,7 +176,15 @@ class ArduinoPressureDevice:
             return
 
         v = max(0.0, float(value_mmHg))
-        self.arduino.sendData(f"SET:{v:.2f}\n")
+        self._last_command_sp = v
+        try:
+            self.arduino.sendData(f"SET:{v:.2f}\n")
+        except Exception:
+            pass
+        try:
+            self.arduino.sendData(f"<{int(round(v))}>\n")
+        except Exception:
+            pass
 
     def _reader_loop(self) -> None:
         while not self._stop_evt.is_set():
@@ -184,11 +197,25 @@ class ArduinoPressureDevice:
                 line = None
             if not line:
                 continue
-            match = self._pattern.search(line.strip())
+            s = line.strip()
+            match = self._pattern.search(s)
+            match_legacy = None
+            sp: Optional[float] = None
             if match:
                 p1 = float(match.group(1))
                 p2 = float(match.group(2))
                 sp = float(match.group(3))
+            else:
+                match_legacy = self._pattern_legacy.search(s)
+                if match_legacy:
+                    p1 = float(match_legacy.group(1))
+                    p2 = float(match_legacy.group(2))
+                    g3 = match_legacy.group(3)
+                    sp = float(g3) if g3 is not None else None
+            if match or match_legacy:
+                if sp is None:
+                    previous = self._latest[2]
+                    sp = previous if previous is not None else self._last_command_sp
                 self._latest = (p1, p2, sp)
 
     def read_latest(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
