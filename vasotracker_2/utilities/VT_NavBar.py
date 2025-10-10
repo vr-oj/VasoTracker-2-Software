@@ -9,14 +9,24 @@
 
 
 import os, sys
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
 from PIL import Image, ImageTk
 
-def get_resource_path(relative_path):
-    """Get the path to a resource, whether it's bundled with PyInstaller or not."""
-    base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
+_MODULE_ROOT = Path(__file__).resolve().parent.parent
+
+
+def get_resource_path(relative_path: str) -> str:
+    """
+    Return a resource path that works both in development and PyInstaller builds.
+
+    PyInstaller sets `_MEIPASS` to the unpacked temp directory; otherwise fall
+    back to the package folder so we can load bundled images when launched from
+    any working directory.
+    """
+    base_path = getattr(sys, "_MEIPASS", _MODULE_ROOT)
     return os.path.join(base_path, relative_path)
 
 # Resource paths
@@ -178,4 +188,3 @@ class CustomVTToolbar(NavigationToolbar2Tk):
         resized_image = img.resize((25, 25), Image.LANCZOS)
         tk_image = ImageTk.PhotoImage(resized_image)
         return tk_image
-
