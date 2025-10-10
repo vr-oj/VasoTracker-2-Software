@@ -152,6 +152,10 @@ VasoTracker_Blue = '#203C57'
 frame_label_color = VasoTracker_Blue
 frame_label_height = 25
 entry_disabled_color="#BDC3C7"
+entry_active_color="#FFFFFF"
+entry_text_color="#0B2533"
+entry_placeholder_color="#6B7C8F"
+button_enabled_color="white"
 
 # The following is so that the required resources are included in the PyInstaller build.
 # Utility functions
@@ -2185,6 +2189,15 @@ def make_entry_factory(self):
     def make_entry(EntryType: Type[tk.Widget], row, column=1, sticky="",padx=0, pady=2, disabled=False, **kwargs):
         # Set default width to 8 unless specified in kwargs
         kwargs.setdefault('width', 50)
+        try:
+            is_ctk_entry = issubclass(EntryType, ctk.CTkEntry)
+        except Exception:
+            is_ctk_entry = False
+        if is_ctk_entry:
+            kwargs.setdefault("text_color", entry_text_color)
+            kwargs.setdefault("placeholder_text_color", entry_placeholder_color)
+            if not disabled and "fg_color" not in kwargs:
+                kwargs["fg_color"] = entry_active_color
         # NOTE(cmo): The need for this is due to tkinter being silly and
         # requiring *args be used for the options in an OptionMenu
         if "args" in kwargs:
@@ -2194,6 +2207,12 @@ def make_entry_factory(self):
         entry.grid(row=row, column=column, padx=padx, pady=pady, sticky=sticky)
         if disabled:
             entry.configure(state=tk.DISABLED)
+        if is_ctk_entry:
+            entry.configure(
+                text_color=kwargs.get("text_color", entry_text_color),
+                placeholder_text_color=kwargs.get("placeholder_text_color", entry_placeholder_color),
+                text_color_disabled="#7F8C99",
+            )
         return entry
 
     return make_entry
@@ -3262,6 +3281,7 @@ class PressureControlPane(ToolbarPane):
         self.parent = parent
         self.model_vars = model_vars
         sv = model_vars.toolbar.pressure_protocol
+        self._locked = True
 
         self.pack(side=tk.LEFT, anchor=tk.N, padx=5, pady=5, fill=tk.Y)
         self.frame_label = ctk.CTkLabel(self, text="Pressure control (mmHg)", font=(default_font, 16, 'bold'), fg_color=frame_label_color, height=frame_label_height, text_color='white').grid(row=0, column=0, columnspan=4,padx=1,pady=1, sticky="nsew")
@@ -3303,7 +3323,17 @@ class PressureControlPane(ToolbarPane):
         ctk.CTkLabel(self, text="Manual control:", font=(default_font, default_font_size)).grid(row=2, column=0, columnspan=4, sticky=tk.W)
 
         # Recessed Entry
-        self.outer_diam_entry = ctk.CTkEntry(self, font=(default_font, 20), textvariable=sv.set_pressure, justify=justify, width=100, fg_color=entry_disabled_color, state=tk.DISABLED)
+        self.outer_diam_entry = ctk.CTkEntry(
+            self,
+            font=(default_font, 20),
+            textvariable=sv.set_pressure,
+            justify=justify,
+            width=100,
+            fg_color=entry_disabled_color,
+            text_color=entry_text_color,
+            placeholder_text_color=entry_placeholder_color,
+            state=tk.DISABLED,
+        )
         self.outer_diam_entry.grid(row=3, column=1, columnspan=2)  # Span two columns
 
         self.minus_img = self.resize_img(os.path.join(images_folder, 'Subtract Button Black.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
@@ -3321,7 +3351,17 @@ class PressureControlPane(ToolbarPane):
         self.pressure_increment_entry = ctk.CTkSlider(self, from_=1, to=20, variable=sv.pressure_increment, width=120)
         self.pressure_increment_entry.grid(row=5, column=0, padx=padx, columnspan=2)  # Span two columns
 
-        self.slider_value_entry = ctk.CTkEntry(self, textvariable=sv.pressure_increment, justify=justify, width=40,font=(default_font,20), fg_color=entry_disabled_color, state=tk.DISABLED)
+        self.slider_value_entry = ctk.CTkEntry(
+            self,
+            textvariable=sv.pressure_increment,
+            justify=justify,
+            width=40,
+            font=(default_font, 20),
+            fg_color=entry_disabled_color,
+            text_color=entry_text_color,
+            placeholder_text_color=entry_placeholder_color,
+            state=tk.DISABLED,
+        )
         self.slider_value_entry.grid(row=5, column=2, padx=padx, columnspan=2, sticky="w")  # Span two columns
 
         self.model_vars.app.auto_pressure.trace_add(
@@ -3353,15 +3393,20 @@ class PressureControlPane(ToolbarPane):
         for widget, text in tooltips.items():
             tooltip.register(widget, text)
 
+        self.set_lock_state()
+
 
     def start_protocol_button_state_callback(self):
         running = self.model_vars.app.auto_pressure.get()
         if running:
             self.start_protocol_button.configure(image=self.pressure_stop_img)
-            self.set_pressure_button.configure(state=tk.DISABLED, fg_color="#BDC3C7")
+            self.set_pressure_button.configure(state=tk.DISABLED, fg_color=entry_disabled_color)
         else:
             self.start_protocol_button.configure(image=self.pressure_start_img)
-            self.set_pressure_button.configure(state=tk.NORMAL, fg_color="white")
+            if self._locked:
+                self.set_pressure_button.configure(state=tk.DISABLED, fg_color=entry_disabled_color)
+            else:
+                self.set_pressure_button.configure(state=tk.NORMAL, fg_color=button_enabled_color)
 
     def resize_img(self, img_path, width=50, height=50):  # Match BUTTON_WIDTH and BUTTON_HEIGHT
         img = Image.open(img_path)
@@ -3370,16 +3415,29 @@ class PressureControlPane(ToolbarPane):
         return tk_image
 
     def set_lock_state(self, state=tk.DISABLED):
-        pass
-        #self.start_protocol_button.configure(state=state)
-        #self.set_pressure_entry.configure(state=state)
-        #self.set_pressure_button.configure(state=state)
+        disabled = state == tk.DISABLED
+        self._locked = disabled
+        button_state = tk.DISABLED if disabled else tk.NORMAL
+        slider_state = "disabled" if disabled else "normal"
+        entry_state = tk.DISABLED if disabled else tk.NORMAL
+        entry_bg = entry_disabled_color if disabled else entry_active_color
+
+        self.start_protocol_button.configure(
+            state=button_state,
+            fg_color=entry_disabled_color if disabled else button_enabled_color,
+        )
+        self.set_pressure_button.configure(
+            state=button_state,
+            fg_color=entry_disabled_color if disabled else button_enabled_color,
+        )
+        self.add_button.configure(state=button_state)
+        self.minus_button.configure(state=button_state)
+        self.pressure_increment_entry.configure(state=slider_state)
+        self.outer_diam_entry.configure(state=entry_state, fg_color=entry_bg)
+        self.slider_value_entry.configure(state=entry_state, fg_color=entry_bg)
 
     def set_unlock_state(self, state=tk.NORMAL):
-        pass
-        #self.start_protocol_button.configure(state=state)
-        #self.set_pressure_entry.configure(state=state)
-        #self.set_pressure_button.configure(state=state)
+        self.set_lock_state(state=tk.NORMAL)
 
     def enable_buttons(self):
         self.start_protocol_button.configure(state=tk.NORMAL)
@@ -4193,7 +4251,15 @@ class TableFrame(ttk.Frame):
             row=0, column=0, columnspan=5, sticky=tk.N + tk.S + tk.E + tk.W
         )
         #ctk.CTkLabel(table_controls, text="Label:").grid(row=0, column=0)
-        self.label_entry = ctk.CTkEntry(table_controls, width=200, textvariable=sv.label, font=(default_font, default_font_size), fg_color="white")
+        self.label_entry = ctk.CTkEntry(
+            table_controls,
+            width=200,
+            textvariable=sv.label,
+            font=(default_font, default_font_size),
+            fg_color="white",
+            text_color=entry_text_color,
+            placeholder_text_color=entry_placeholder_color,
+        )
         self.label_entry.grid(row=0, column=1)
         self.add_button = ctk.CTkButton(table_controls, text="Add", font=(default_font, default_font_size), width=80, text_color="black")
         self.add_button.grid(row=0, column=2, padx=padx)
@@ -4202,8 +4268,14 @@ class TableFrame(ttk.Frame):
             row=0, column=4, padx=(20, 0)
         )
         self.ref_diam_entry = ctk.CTkEntry(
-            table_controls, width=60, textvariable=sv.ref_diam, font=(default_font, default_font_size), fg_color=entry_disabled_color
-            )
+            table_controls,
+            width=60,
+            textvariable=sv.ref_diam,
+            font=(default_font, default_font_size),
+            fg_color=entry_disabled_color,
+            text_color=entry_text_color,
+            placeholder_text_color=entry_placeholder_color,
+        )
         self.ref_diam_entry.grid(row=0, column=5)
         self.ref_diam_entry.configure(state=tk.DISABLED)
 
@@ -5292,14 +5364,17 @@ class Controller:
             self.pressure_controller.adjust_pressure(new_pressure_value, update_table=True)
 
     def open_pressure_settings(self):
-        self.view.toolbar.pressure_control_settings.start_protocol_button.configure(state=tk.NORMAL)
-        self.view.toolbar.pressure_control_settings.start_protocol_button.configure(fg_color='white')
-        self.view.toolbar.pressure_control_settings.set_pressure_button.configure(state=tk.NORMAL)
-        self.view.toolbar.pressure_control_settings.set_pressure_button.configure(fg_color='white')
+        controller = self.pressure_controller
+        if controller is not None:
+            controller.configure_from_state(start_immediately=True)
+            controller.start()
 
-        if self.pressure_controller is not None:
-            self.pressure_controller.configure_from_state(start_immediately=True)
-            self.pressure_controller.start()
+        pane = self.view.toolbar.pressure_control_settings
+        active_type = controller.active_device_type() if controller is not None else "none"
+        if active_type != "none":
+            pane.set_unlock_state()
+        else:
+            pane.set_lock_state()
 
         self.show_pressure_hardware_popup()
 

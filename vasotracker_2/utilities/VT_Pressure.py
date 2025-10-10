@@ -234,10 +234,17 @@ class PressureController:
             nidaq_task=nidaq_task,
         )
 
-        if type_name == "none":
-            self.view.toolbar.pressure_protocol_settings.set_lock_state()
-        else:
-            self.view.toolbar.pressure_protocol_settings.set_unlock_state()
+        toolbar = getattr(self.view, "toolbar", None)
+        if toolbar is not None:
+            try:
+                if type_name == "none":
+                    toolbar.pressure_protocol_settings.set_lock_state()
+                    toolbar.pressure_control_settings.set_lock_state()
+                else:
+                    toolbar.pressure_protocol_settings.set_unlock_state()
+                    toolbar.pressure_control_settings.set_unlock_state()
+            except Exception:
+                pass
 
     def _setup_arduino_device(self, port: str, baud: int, start_immediately: bool = False) -> None:
         requested = (port or "").strip()
