@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import math
 import time
 import tkinter.messagebox as tmb
@@ -85,6 +85,8 @@ class PressureController:
         self.last_update_time: Optional[float] = None
         self.update_threshold: float = 1.0
         self.set_pressure: float = 0.0
+        self._status_reset_job: Optional[str] = None
+        self._default_status_text = self._capture_status_text()
 
         # Configure from persisted settings
         self.configure_from_state(start_immediately=False)
@@ -92,6 +94,76 @@ class PressureController:
     # ------------------------------------------------------------------
     # Device configuration
     # ------------------------------------------------------------------
+    def _capture_status_text(self) -> str:
+        status_bar = getattr(self.view, "status_bar", None)
+        if status_bar is None:
+            return ""
+        try:
+            return str(status_bar.cget("text"))
+        except Exception:
+            return ""
+
+    def _notify_status(self, message: str, *, persist: bool = False, log: bool = True) -> None:
+        if log:
+            print(f"[PressureController] {message}")
+
+        status_bar = getattr(self.view, "status_bar", None)
+        if status_bar is None:
+            return
+
+        try:
+            status_bar.configure(text=message)
+        except Exception:
+            return
+
+        if persist or not self._default_status_text:
+            self._status_reset_job = None
+            return
+
+        if self._status_reset_job is not None:
+            try:
+                status_bar.after_cancel(self._status_reset_job)
+            except Exception:
+                pass
+            self._status_reset_job = None
+
+        def _reset_status() -> None:
+            try:
+                status_bar.configure(text=self._default_status_text)
+            except Exception:
+                pass
+            finally:
+                self._status_reset_job = None
+
+        self._status_reset_job = status_bar.after(8000, _reset_status)
+
+    @staticmethod
+    def _summarise_exception(exc: Exception) -> str:
+        text = str(exc).strip()
+        return text if text else exc.__class__.__name__
+
+    def _discover_serial_ports(self) -> List[Tuple[str, str]]:
+        try:
+            from serial.tools import list_ports
+        except Exception:
+            return []
+
+        ports: List[Tuple[str, str]] = []
+        for info in list_ports.comports():
+            description = " ".join(
+                part for part in (info.manufacturer, info.description, info.hwid) if part
+            ).strip()
+            ports.append((info.device, description or info.device))
+        return ports
+
+    def list_serial_ports(self) -> List[Tuple[str, str]]:
+        """Return a list of (device, description) tuples for available serial ports."""
+        return self._discover_serial_ports()
+
+    def notify_status(self, message: str, *, persist: bool = False, log: bool = True) -> None:
+        """Public helper for UI components that need to surface controller status messages."""
+        self._notify_status(message, persist=persist, log=log)
+
     def configure_from_state(self, start_immediately: bool = False) -> None:
         """Reconfigure the active device based on toolbar/settings state."""
         settings = getattr(self.model.state.toolbar, "pressure_device", None)
@@ -168,37 +240,83 @@ class PressureController:
             self.view.toolbar.pressure_protocol_settings.set_unlock_state()
 
     def _setup_arduino_device(self, port: str, baud: int, start_immediately: bool = False) -> None:
-        if not port:
+        requested = (port or "").strip()
+        candidates: List[str] = []
+        if requested and requested.lower() not in ("auto", "autodetect", "detect"):
+            candidates.append(requested)
+
+        discovered = self._discover_serial_ports()
+        descriptions = {device: desc for device, desc in discovered}
+        for device, _ in discovered:
+            if device not in candidates:
+                candidates.append(device)
+
+        if not candidates:
             self._set_device(NullPressureDevice(), "none")
-            return
-        try:
-            arduino = Arduino(port=port, baud=baud)
-        except Exception as exc:
-            tmb.showinfo(
-                "Arduino connection failed",
-                f"Unable to open serial port '{port}':\n{exc}",
+            self._notify_status(
+                "No serial ports detected. Connect the Arduino and try again.",
+                persist=True,
             )
-            self._set_device(NullPressureDevice(), "none")
             return
 
-        if not arduino.is_connected:
-            if not getattr(arduino, "error_notified", False):
-                last_error = getattr(arduino, "last_error", None)
-                if last_error is not None:
-                    tmb.showinfo(
-                        "Arduino connection failed",
-                        f"Unable to open serial port '{port}':\n{last_error}",
-                    )
-            self._set_device(NullPressureDevice(), "none")
-            return
-
-        device = ArduinoPressureDevice(arduino)
-        self._set_device(device, "arduino", arduino=arduino)
-        if start_immediately:
+        errors: Dict[str, Exception] = {}
+        for device_name in candidates:
+            arduino: Optional[Arduino] = None
             try:
-                device.start()
+                arduino = Arduino(
+                    port=device_name,
+                    baud=baud,
+                    timeout=0.1,
+                    auto_connect=False,
+                    show_errors=False,
+                )
+                arduino.connect()
+                if not arduino.is_connected:
+                    raise RuntimeError("Port opened but is not reporting as connected.")
             except Exception as exc:
-                print("Failed to start Arduino pressure device:", exc)
+                errors[device_name] = exc
+                if arduino is not None:
+                    try:
+                        arduino.close()
+                    except Exception:
+                        pass
+                continue
+
+            device = ArduinoPressureDevice(arduino)
+            self._set_device(device, "arduino", arduino=arduino)
+            try:
+                self.model.state.toolbar.pressure_device.port.set(device_name)
+            except Exception:
+                pass
+
+            info = descriptions.get(device_name, "")
+            label = f"{device_name} ({info})".strip()
+            self._notify_status(f"Connected to Arduino on {label} @ {baud} baud.", log=False)
+
+            if start_immediately:
+                try:
+                    device.start()
+                except Exception as exc:
+                    self._notify_status(
+                        f"Arduino connected but failed to start streaming: {self._summarise_exception(exc)}",
+                        persist=True,
+                    )
+                    print("Failed to start Arduino pressure device:", exc)
+            return
+
+        self._set_device(NullPressureDevice(), "none")
+        tried_ports = ", ".join(errors.keys()) or "none"
+        available_ports = ", ".join(device for device, _ in discovered) or "none"
+        detail_parts = [
+            f"{device}: {self._summarise_exception(exc)}" for device, exc in errors.items()
+        ]
+        detail_text = "; ".join(detail_parts) or "no additional information"
+        message = (
+            "Unable to connect to the Arduino controller. "
+            f"Tried ports: {tried_ports}. Available ports: {available_ports}. "
+            f"Details: {detail_text}."
+        )
+        self._notify_status(message, persist=True)
 
     def _setup_nidaq_device(self, settings) -> PressureDevice:
         if not is_pydaqmx_available():

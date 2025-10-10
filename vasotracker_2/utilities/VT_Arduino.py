@@ -52,6 +52,7 @@ class Arduino:
         baud: int = 115_200,
         timeout: float = 0.1,
         auto_connect: bool = True,
+        show_errors: bool = True,
     ) -> None:
         self.port = port
         self.baud = baud
@@ -60,6 +61,7 @@ class Arduino:
         self._last_error: Optional[Exception] = None
         self._error_notified: bool = False
         self._last_set_mmHg: Optional[float] = None
+        self._show_errors = show_errors
 
         if auto_connect:
             self.connect()
@@ -184,15 +186,17 @@ class Arduino:
             f"Unable to open serial port '{self.port}':\n{exc}\n\n"
             "Tip: close Arduino Serial Monitor or any app using the port."
         )
-        try:
-            # Lazy import keeps this utility usable in headless contexts.
-            from tkinter import messagebox
+        if self._show_errors:
+            try:
+                # Lazy import keeps this utility usable in headless contexts.
+                from tkinter import messagebox
 
-            messagebox.showerror("Arduino connection failed", message)
-            self._error_notified = True
-        except Exception:
+                messagebox.showerror("Arduino connection failed", message)
+            except Exception:
+                print("Arduino connection failed:", message)
+        else:
             print("Arduino connection failed:", message)
-            self._error_notified = True
+        self._error_notified = True
 
 
 @contextmanager

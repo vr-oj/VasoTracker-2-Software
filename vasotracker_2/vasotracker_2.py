@@ -3038,6 +3038,7 @@ class PressureDevicePane(ToolbarPane):
 
     def __init__(self, parent, model_vars: VtState):
         super().__init__(parent, height=200, width=200)
+        self.grid_columnconfigure(2, weight=0)
         self.parent = parent
         self.model_vars = model_vars
         settings = model_vars.toolbar.pressure_device
@@ -3080,6 +3081,13 @@ class PressureDevicePane(ToolbarPane):
             row=2,
             column=1,
         )
+        self.detect_ports_button = ctk.CTkButton(
+            self,
+            text="Detect",
+            width=80,
+            command=self._on_detect_ports,
+        )
+        self.detect_ports_button.grid(row=2, column=2, sticky=tk.W, padx=(6, 2), pady=2)
 
         ctk.CTkLabel(
             self, text="Baud", font=(default_font, default_font_size)
@@ -3138,6 +3146,21 @@ class PressureDevicePane(ToolbarPane):
         self.pydaqmx_status_label.grid(
             row=7, column=0, columnspan=2, padx=2, pady=(8, 2)
         )
+        self.port_hint_label = ctk.CTkLabel(
+            self,
+            text="",
+            font=(default_font, default_font_size - 2),
+            text_color="#6c7a89",
+        )
+        self.port_hint_label.grid(
+            row=8,
+            column=0,
+            columnspan=3,
+            sticky=tk.W,
+            padx=2,
+            pady=(4, 0),
+        )
+        self._set_port_hint("Click Detect to locate connected Arduino devices.")
 
         # Tooltips
         tooltip = ToolTip(self)
@@ -3160,9 +3183,12 @@ class PressureDevicePane(ToolbarPane):
 
         self.port_entry.configure(state=arduino_state)
         self.baud_entry.configure(state=arduino_state)
+        self.detect_ports_button.configure(state=arduino_state)
         self.ni_device_entry.configure(state=ni_state)
         self.ni_ao_entry.configure(state=ni_state)
         self.ni_scale_entry.configure(state=ni_state)
+        if device != "arduino":
+            self._set_port_hint("")
 
     def _on_device_change(self, *args) -> None:
         if getattr(self, "_device_change_pending", False):
@@ -3192,6 +3218,42 @@ class PressureDevicePane(ToolbarPane):
                 self._device_change_pending = False
 
         self.after(0, apply_change)
+
+    def _on_detect_ports(self) -> None:
+        controller = self.model_vars.pressure_controller
+        if controller is None:
+            return
+
+        ports = controller.list_serial_ports()
+        if not ports:
+            controller.notify_status(
+                "No serial devices detected. Connect the Arduino and click Detect again.",
+                persist=True,
+            )
+            self._set_port_hint("Detected ports: none")
+            return
+
+        hint = ", ".join(f"{device} ({desc})" if desc else device for device, desc in ports)
+        self._set_port_hint(f"Detected ports: {hint}")
+
+        preferred = self._pick_preferred_port(ports)
+        if preferred:
+            self.model_vars.toolbar.pressure_device.port.set(preferred)
+            self._set_port_hint(f"Selected port: {preferred} • Detected ports: {hint}")
+            controller.configure_from_state(start_immediately=True)
+            controller.start()
+
+    @staticmethod
+    def _pick_preferred_port(ports: List[Tuple[str, str]]) -> Optional[str]:
+        keywords = ("vasomoto", "arduino", "usb", "serial", "cu.", "tty", "com")
+        for device, description in ports:
+            text = f"{device} {description}".lower()
+            if any(keyword in text for keyword in keywords):
+                return device
+        return ports[0][0] if ports else None
+
+    def _set_port_hint(self, text: str) -> None:
+        self.port_hint_label.configure(text=text)
 
 
 class PressureControlPane(ToolbarPane):
