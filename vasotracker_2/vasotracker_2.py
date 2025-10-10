@@ -2207,12 +2207,6 @@ def make_entry_factory(self):
         entry.grid(row=row, column=column, padx=padx, pady=pady, sticky=sticky)
         if disabled:
             entry.configure(state=tk.DISABLED)
-        if is_ctk_entry:
-            entry.configure(
-                text_color=kwargs.get("text_color", entry_text_color),
-                placeholder_text_color=kwargs.get("placeholder_text_color", entry_placeholder_color),
-                text_color_disabled="#7F8C99",
-            )
         return entry
 
     return make_entry
