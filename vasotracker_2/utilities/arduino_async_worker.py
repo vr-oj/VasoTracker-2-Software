@@ -42,7 +42,7 @@ class ArduinoSerialWorker:
         read_timeout: float = 0.1,
         write_timeout: float = 0.5,
         warmup_s: float = 1.2,
-        handshake_s: float = 2.0,
+        handshake_s: float = 0.0,
         retry_delay: float = 1.0,
         auto_reconnect: bool = True,
         write_queue_size: int = DEFAULT_WRITE_QUEUE,
@@ -218,8 +218,14 @@ class ArduinoSerialWorker:
         self._emit_status("open", {"port": port})
         self._emit_status("syncing", {"port": port})
 
-        warmup_deadline = time.monotonic() + self.warmup_s
-        handshake_deadline = time.monotonic() + max(self.handshake_s, self.warmup_s)
+        warmup_deadline = (
+            time.monotonic() + self.warmup_s if self.warmup_s > 0 else None
+        )
+        warmup_notified = False
+        handshake_deadline = (
+            time.monotonic() + self.handshake_s if self.handshake_s > 0 else None
+        )
+        handshake_warned = False
 
         while not self._stop_evt.is_set():
             self._flush_outbox(handle)
@@ -249,24 +255,32 @@ class ArduinoSerialWorker:
                     if changed:
                         self._emit_status("healthy", {"port": port})
 
-            if now >= warmup_deadline and self.monitor.state == LinkState.SYNCING:
-                # Still waiting for telemetry after warm-up.
+            if (
+                warmup_deadline
+                and not warmup_notified
+                and now >= warmup_deadline
+                and self.monitor.state == LinkState.SYNCING
+            ):
+                # Still waiting for telemetry after the warm-up window.
                 self._emit_status("syncing", {"port": port, "warmup": self.warmup_s})
+                warmup_notified = True
 
             changed, state, info = self.monitor.evaluate(timestamp=now)
             if changed and state == LinkState.STALE:
                 self._emit_status("stale", {"port": port, **info})
 
-            if now >= handshake_deadline and self.monitor.state in (LinkState.SYNCING, LinkState.OPEN):
-                # Stop waiting forever if firmware stays silent.
-                self._emit_status(
-                    "error",
-                    {
-                        "port": port,
-                        "message": "Timed out waiting for Arduino telemetry.",
-                    },
-                )
-                return
+            if (
+                handshake_deadline
+                and not handshake_warned
+                and now >= handshake_deadline
+                and self.monitor.state in (LinkState.SYNCING, LinkState.OPEN)
+            ):
+                # Promote to stale once, but keep the port open for late telemetry.
+                self.monitor.transition(LinkState.STALE, timestamp=now)
+                info = self.monitor.snapshot(now)
+                info.update({"port": port, "reason": "handshake_timeout", "timeout": self.handshake_s})
+                self._emit_status("stale", info)
+                handshake_warned = True
 
         # Graceful shutdown path
         self._flush_outbox(handle)
