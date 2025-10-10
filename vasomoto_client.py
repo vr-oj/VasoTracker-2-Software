@@ -39,6 +39,7 @@ COMMON_BAUDS: List[int] = [115200, 57600, 38400, 19200, 9600]
 
 # Command templates that cover the most frequently used VasoMoto formats.
 COMMAND_STYLES: List[str] = [
+    "<{v}>\n",
     "P {v}\n",
     "P:{v}\n",
     "P={v}\n",
@@ -213,7 +214,11 @@ class VasoMotoClient:
                 pass
 
         # key:value or key=value pairs
-        tokens = re.split(r"[,\t ]+", stripped)
+        token_source = stripped
+        if token_source.startswith("<") and token_source.endswith(">"):
+            token_source = token_source[1:-1]
+        token_source = token_source.replace(";", " ").replace("|", " ")
+        tokens = re.split(r"[,\t ]+", token_source)
         kv: Dict[str, Any] = {}
         for token in tokens:
             if ":" in token:
@@ -279,6 +284,16 @@ class VasoMotoClient:
         if not self.ser:
             raise RuntimeError("Serial port is not open.")
         self.ser.write(text.encode())
+
+    def send_raw(self, payload: str) -> None:
+        """
+        Send a raw command string to the device. Automatically appends a trailing
+        newline if one is not present so sketches that expect line-based commands
+        continue to work as expected.
+        """
+        if not payload.endswith("\n"):
+            payload += "\n"
+        self._send_line(payload)
 
     def _to_device_units(self, value_mmHg: float) -> float:
         return value_mmHg * self.scale + self.offset
