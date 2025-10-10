@@ -4955,11 +4955,10 @@ class Controller:
             tb.plotting.line_buttons[i].configure(command=partial(self.toggle_line, i))
         '''
 
-        if is_pydaqmx_available():
-            tb.pressure_control_settings.start_protocol_button.configure(command=self.servo_start)
-            #tb.pressure_protocol_settings.stop_protocol_button.configure(command=self.servo_stop)
-            tb.pressure_control_settings.add_button.configure(command=self.increase_pressure)
-            tb.pressure_control_settings.minus_button.configure(command=self.decrease_pressure)
+        tb.pressure_control_settings.start_protocol_button.configure(command=self.servo_start)
+        #tb.pressure_protocol_settings.stop_protocol_button.configure(command=self.servo_stop)
+        tb.pressure_control_settings.add_button.configure(command=self.increase_pressure)
+        tb.pressure_control_settings.minus_button.configure(command=self.decrease_pressure)
 
         tb.start_stop.start_button.configure(command=self.start_acq)
         tb.start_stop.track_button.configure(command=self.start_tracking)
@@ -4968,10 +4967,9 @@ class Controller:
         self.view.table.add_button.configure(command=self.add_table_row)
         self.view.table.ref_button.configure(command=self.set_ref_diameter)
 
-        if is_pydaqmx_available():
-            tb.pressure_control_settings.set_pressure_button.configure(command=self.update_set_pressure)
-            tb.pressure_control_settings.pressure_connect_button.configure(command=self.open_pressure_settings)
-            tb.pressure_control_settings.pressure_settings_button.configure(command=self.open_pressure_protocol_settings)
+        tb.pressure_control_settings.set_pressure_button.configure(command=self.update_set_pressure)
+        tb.pressure_control_settings.pressure_connect_button.configure(command=self.open_pressure_settings)
+        tb.pressure_control_settings.pressure_settings_button.configure(command=self.open_pressure_protocol_settings)
 
 
     def bind_checkboxes(self):
@@ -5176,6 +5174,9 @@ class Controller:
                 start_time = time.time()
                 self.model.state.toolbar.pressure_protocol.protocol_start_time.set(start_time)
                 self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.set(1)
+                if self.model.pressure_controller is not None:
+                    # Ensure the controller pulls the latest UI values and sets the initial pressure.
+                    self.model.pressure_controller.reset_protocol()
                 #self.view.toolbar.pressure_control_settings.toggle_protocol_button()
                 self.model.state.app.auto_pressure.set(not current_state)
         else:
