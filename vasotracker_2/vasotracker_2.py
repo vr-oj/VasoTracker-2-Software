@@ -176,8 +176,8 @@ def get_resource_path(relative_path: str) -> str:
 
 
 # Resource paths
-images_folder = get_resource_path("images\\")
-sample_data_path = get_resource_path("SampleData\\")
+images_folder = get_resource_path(os.path.join("images"))
+sample_data_path = get_resource_path(os.path.join("SampleData"))
 gui_json_path = get_resource_path("VasoTrackerblue.json")
 
 # TODOs and Future Improvements

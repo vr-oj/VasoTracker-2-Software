@@ -30,8 +30,8 @@ def get_resource_path(relative_path: str) -> str:
     return os.path.join(base_path, relative_path)
 
 # Resource paths
-images_folder = get_resource_path("images\\")
-sample_data_path = get_resource_path("SampleData\\")
+images_folder = get_resource_path(os.path.join("images"))
+sample_data_path = get_resource_path(os.path.join("SampleData"))
 
 class CustomVTToolbar(NavigationToolbar2Tk):
     def __init__(self, canvas, parent, graph_frame, *args, **kwargs):
