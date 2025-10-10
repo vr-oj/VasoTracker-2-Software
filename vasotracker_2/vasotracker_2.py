@@ -159,9 +159,18 @@ button_enabled_color="white"
 
 # The following is so that the required resources are included in the PyInstaller build.
 # Utility functions
-def get_resource_path(relative_path):
-    """Get the path to a resource, whether it's bundled with PyInstaller or not."""
-    base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
+_MODULE_ROOT = Path(__file__).resolve().parent
+
+
+def get_resource_path(relative_path: str) -> str:
+    """
+    Return an absolute path to a bundled resource.
+
+    When running from a PyInstaller bundle `_MEIPASS` points at the unpacked
+    temp directory.  Otherwise fall back to the package folder so resources are
+    located correctly even if the working directory is elsewhere.
+    """
+    base_path = getattr(sys, "_MEIPASS", _MODULE_ROOT)
     return os.path.join(base_path, relative_path)
 
 
