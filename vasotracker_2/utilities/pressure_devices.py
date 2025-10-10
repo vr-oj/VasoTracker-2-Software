@@ -20,6 +20,8 @@ import re
 import threading
 import time
 
+from .arduino_async_worker import ArduinoSerialWorker
+
 
 class PressureDevice(Protocol):
     """Interface implemented by every concrete pressure backend."""
@@ -111,7 +113,12 @@ class ArduinoPressureDevice:
       Arduino -> PC: 'P1:<v>,P2:<v>,SET:<v>\\n' (modern) or '<P1:<v>;P2:<v>>' (legacy)
     """
 
-    def __init__(self, arduino, stream_rate_hz: float = 20.0) -> None:
+    def __init__(
+        self,
+        arduino=None,
+        stream_rate_hz: float = 20.0,
+        worker: Optional[ArduinoSerialWorker] = None,
+    ) -> None:
         """
         Parameters
         ----------
@@ -119,11 +126,15 @@ class ArduinoPressureDevice:
             Instance exposing `sendData(text: str) -> None` and
             `readline(timeout: float) -> Optional[str]`.
             The utilities.VT_Arduino.Arduino class satisfies this interface.
+        worker:
+            Optional asynchronous worker that pushes telemetry lines via
+            callbacks. When provided the legacy polling thread is bypassed.
         stream_rate_hz:
             Expected telemetry rate; used to set the poll timeout.
         """
 
         self.arduino = arduino
+        self.worker = worker
         self._stop_evt = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._latest: Tuple[Optional[float], Optional[float], Optional[float]] = (
@@ -140,20 +151,23 @@ class ArduinoPressureDevice:
         self._last_sent_set_mmHg: Optional[float] = None
         self._interval = 1.0 / max(1.0, stream_rate_hz)
 
+    def bind_worker(self, worker: ArduinoSerialWorker) -> None:
+        """Attach an async serial worker after construction."""
+        self.worker = worker
+
     def start(self) -> None:
+        if self.worker is not None:
+            self.worker.start()
+            self._queue_command("PING")
+            self._queue_command("START")
+            return
+
         if not getattr(self.arduino, "is_connected", False):
             return
 
         self._stop_evt.clear()
-        try:
-            self.arduino.sendData("PING\n")
-        except Exception:
-            pass
-
-        try:
-            self.arduino.sendData("START\n")
-        except Exception:
-            pass
+        self._queue_command("PING")
+        self._queue_command("START")
 
         if self._thread and self._thread.is_alive():
             return
@@ -162,21 +176,27 @@ class ArduinoPressureDevice:
         self._thread.start()
 
     def stop(self) -> None:
+        if self.worker is not None:
+            self._queue_command("STOP")
+            return
+
         self._stop_evt.set()
-        try:
-            self.arduino.sendData("STOP\n")
-        except Exception:
-            pass
+        self._queue_command("STOP")
         if self._thread:
             self._thread.join(timeout=1.0)
             self._thread = None
 
     def set_pressure(self, value_mmHg: float) -> None:
+        v = max(0.0, float(value_mmHg))
+        self._last_sent_set_mmHg = v
+        if self.worker is not None:
+            self._queue_command(f"SET:{v:.2f}")
+            self._queue_command(f"<{int(round(v))}>")
+            return
+
         if not getattr(self.arduino, "is_connected", False):
             return
 
-        v = max(0.0, float(value_mmHg))
-        self._last_sent_set_mmHg = v
         try:
             self.arduino.sendData(f"SET:{v:.2f}\n")
         except Exception:
@@ -193,29 +213,48 @@ class ArduinoPressureDevice:
                 line = None
             if not line:
                 continue
-            s = line.strip()
-            match = self._pattern.search(s)
-            match_legacy = None
-            sp: Optional[float] = None
-            if match:
-                p1 = float(match.group(1))
-                p2 = float(match.group(2))
-                sp = float(match.group(3))
-            else:
-                match_legacy = self._pattern_legacy.search(s)
-                if match_legacy:
-                    p1 = float(match_legacy.group(1))
-                    p2 = float(match_legacy.group(2))
-                    g3 = match_legacy.group(3)
-                    sp = float(g3) if g3 is not None else None
-            if match or match_legacy:
-                if sp is None:
-                    previous = self._latest[2]
-                    sp = previous if previous is not None else self._last_sent_set_mmHg
-                self._latest = (p1, p2, sp)
+            self._process_line(line.strip())
 
     def read_latest(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         return self._latest
+
+    def handle_line(self, line: str) -> None:
+        """Entry point used by the async worker to feed telemetry."""
+        self._process_line(line.strip())
+
+    # Internal helpers -------------------------------------------------------
+    def _process_line(self, s: str) -> None:
+        if not s:
+            return
+        match = self._pattern.search(s)
+        match_legacy = None
+        sp: Optional[float] = None
+        if match:
+            p1 = float(match.group(1))
+            p2 = float(match.group(2))
+            sp = float(match.group(3))
+        else:
+            match_legacy = self._pattern_legacy.search(s)
+            if match_legacy:
+                p1 = float(match_legacy.group(1))
+                p2 = float(match_legacy.group(2))
+                g3 = match_legacy.group(3)
+                sp = float(g3) if g3 is not None else None
+        if match or match_legacy:
+            if sp is None:
+                previous = self._latest[2]
+                sp = previous if previous is not None else self._last_sent_set_mmHg
+            self._latest = (p1, p2, sp)
+
+    def _queue_command(self, text: str) -> None:
+        payload = text if text.endswith("\n") else f"{text}\n"
+        if self.worker is not None:
+            self.worker.write(payload, ensure_newline=False)
+        elif self.arduino is not None:
+            try:
+                self.arduino.sendData(payload)
+            except Exception:
+                pass
 
 
 class NIDaqPressureDevice:

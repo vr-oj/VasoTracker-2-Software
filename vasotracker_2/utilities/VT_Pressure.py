@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 import math
 import time
 import tkinter.messagebox as tmb
@@ -24,6 +24,8 @@ from .pressure_devices import (
     SimPressureDevice,
 )
 from .VT_Arduino import Arduino
+from .arduino_async_worker import ArduinoSerialWorker
+from .arduino_link_monitor import LinkMonitor
 
 
 def is_pydaqmx_available() -> bool:
@@ -49,6 +51,8 @@ class DeviceContext:
     device: PressureDevice
     type_name: str
     arduino: Optional[Arduino] = None
+    worker: Optional[ArduinoSerialWorker] = None
+    monitor: Optional[LinkMonitor] = None
     nidaq_task: Optional["PyDAQmx.Task"] = None  # type: ignore[name-defined]
 
 
@@ -164,6 +168,28 @@ class PressureController:
         """Public helper for UI components that need to surface controller status messages."""
         self._notify_status(message, persist=persist, log=log)
 
+    def _dispatch_to_ui(self, func: Callable[[], None]) -> None:
+        """Execute `func` on the UI thread if possible."""
+        status_bar = getattr(self.view, "status_bar", None)
+        if status_bar is not None:
+            try:
+                status_bar.after(0, func)
+                return
+            except Exception:
+                pass
+        after = getattr(self.view, "after", None)
+        if callable(after):
+            try:
+                after(0, func)
+                return
+            except Exception:
+                pass
+        func()
+
+    def _notify_status_async(self, message: str, *, persist: bool = False, log: bool = True) -> None:
+        """Thread-safe wrapper around `_notify_status`."""
+        self._dispatch_to_ui(lambda m=message, p=persist, l=log: self._notify_status(m, persist=p, log=l))
+
     def configure_from_state(self, start_immediately: bool = False) -> None:
         """Reconfigure the active device based on toolbar/settings state."""
         settings = getattr(self.model.state.toolbar, "pressure_device", None)
@@ -205,6 +231,8 @@ class PressureController:
         type_name: str,
         *,
         arduino: Optional[Arduino] = None,
+        worker: Optional[ArduinoSerialWorker] = None,
+        monitor: Optional[LinkMonitor] = None,
         nidaq_task: Optional["PyDAQmx.Task"] = None,  # type: ignore[name-defined]
     ) -> None:
         ctx = self._device_ctx
@@ -212,6 +240,11 @@ class PressureController:
             ctx.device.stop()
         except Exception:
             pass
+        if ctx.worker is not None:
+            try:
+                ctx.worker.stop()
+            except Exception:
+                pass
         if ctx.arduino is not None:
             try:
                 ctx.arduino.close()
@@ -231,6 +264,8 @@ class PressureController:
             device=device,
             type_name=type_name,
             arduino=arduino,
+            worker=worker,
+            monitor=monitor,
             nidaq_task=nidaq_task,
         )
 
@@ -248,17 +283,10 @@ class PressureController:
 
     def _setup_arduino_device(self, port: str, baud: int, start_immediately: bool = False) -> None:
         requested = (port or "").strip()
-        candidates: List[str] = []
-        if requested and requested.lower() not in ("auto", "autodetect", "detect"):
-            candidates.append(requested)
-
+        auto_detect = requested.lower() in ("", "auto", "autodetect", "detect")
         discovered = self._discover_serial_ports()
-        descriptions = {device: desc for device, desc in discovered}
-        for device, _ in discovered:
-            if device not in candidates:
-                candidates.append(device)
 
-        if not candidates:
+        if not discovered and auto_detect:
             self._set_device(NullPressureDevice(), "none")
             self._notify_status(
                 "No serial ports detected. Connect the Arduino and try again.",
@@ -266,64 +294,89 @@ class PressureController:
             )
             return
 
-        errors: Dict[str, Exception] = {}
-        for device_name in candidates:
-            arduino: Optional[Arduino] = None
-            try:
-                arduino = Arduino(
-                    port=device_name,
-                    baud=baud,
-                    timeout=0.1,
-                    auto_connect=False,
-                    show_errors=False,
-                )
-                arduino.connect()
-                if not arduino.is_connected:
-                    raise RuntimeError("Port opened but is not reporting as connected.")
-            except Exception as exc:
-                errors[device_name] = exc
-                if arduino is not None:
-                    try:
-                        arduino.close()
-                    except Exception:
-                        pass
-                continue
+        monitor = LinkMonitor(expected_rx_hz=5.0, warmup_s=1.2, stale_s=2.5)
+        device = ArduinoPressureDevice(worker=None)
+        last_status: Dict[str, Optional[str]] = {"event": None}
 
-            device = ArduinoPressureDevice(arduino)
-            self._set_device(device, "arduino", arduino=arduino)
-            try:
-                self.model.state.toolbar.pressure_device.port.set(device_name)
-            except Exception:
-                pass
-
-            info = descriptions.get(device_name, "")
-            label = f"{device_name} ({info})".strip()
-            self._notify_status(f"Connected to Arduino on {label} @ {baud} baud.", log=False)
-
-            if start_immediately:
+        def update_port_variable(device_name: str) -> None:
+            def setter() -> None:
                 try:
-                    device.start()
-                except Exception as exc:
-                    self._notify_status(
-                        f"Arduino connected but failed to start streaming: {self._summarise_exception(exc)}",
-                        persist=True,
-                    )
-                    print("Failed to start Arduino pressure device:", exc)
-            return
+                    self.model.state.toolbar.pressure_device.port.set(device_name)
+                except Exception:
+                    pass
 
-        self._set_device(NullPressureDevice(), "none")
-        tried_ports = ", ".join(errors.keys()) or "none"
-        available_ports = ", ".join(device for device, _ in discovered) or "none"
-        detail_parts = [
-            f"{device}: {self._summarise_exception(exc)}" for device, exc in errors.items()
-        ]
-        detail_text = "; ".join(detail_parts) or "no additional information"
-        message = (
-            "Unable to connect to the Arduino controller. "
-            f"Tried ports: {tried_ports}. Available ports: {available_ports}. "
-            f"Details: {detail_text}."
+            self._dispatch_to_ui(setter)
+
+        def status_callback(event: str, info: dict) -> None:
+            port_name = info.get("port") or (requested if requested else "auto")
+            # Reduce chatter for repeated states.
+            if event == last_status["event"] and event not in ("error", "stale", "healthy"):
+                return
+            last_status["event"] = event
+
+            if event == "connecting":
+                self._notify_status_async(f"Connecting to Arduino on {port_name}...", log=False)
+            elif event == "open":
+                self._notify_status_async(f"Serial port {port_name} opened.", log=False)
+                actual_port = info.get("port")
+                if actual_port:
+                    update_port_variable(actual_port)
+            elif event == "syncing":
+                self._notify_status_async(
+                    f"Waiting for Arduino telemetry ({port_name})...", log=False
+                )
+            elif event == "healthy":
+                hz = info.get("rx_hz")
+                if hz:
+                    self._notify_status_async(
+                        f"Arduino telemetry active ({hz:.1f} Hz).",
+                        log=False,
+                    )
+                else:
+                    self._notify_status_async("Arduino telemetry active.", log=False)
+            elif event == "stale":
+                age = info.get("age")
+                if age:
+                    self._notify_status_async(
+                        f"Arduino telemetry stale ({age:.1f}s gap).",
+                        log=False,
+                    )
+                else:
+                    self._notify_status_async("Arduino telemetry stale.", log=False)
+            elif event == "error":
+                message = info.get("message") or "Unknown error"
+                self._notify_status_async(
+                    f"Arduino error on {port_name}: {message}",
+                    persist=True,
+                )
+            elif event == "closed":
+                self._notify_status_async(f"Arduino connection closed ({port_name}).", log=False)
+
+        worker = ArduinoSerialWorker(
+            port=None if auto_detect else requested,
+            baud=baud,
+            monitor=monitor,
+            line_callback=device.handle_line,
+            status_callback=status_callback,
         )
-        self._notify_status(message, persist=True)
+        device.bind_worker(worker)
+        self._set_device(device, "arduino", worker=worker, monitor=monitor)
+
+        if not discovered and not auto_detect:
+            self._notify_status_async(
+                f"Serial port {requested} not detected. The worker will keep retrying.",
+                persist=True,
+            )
+
+        if start_immediately:
+            try:
+                device.start()
+            except Exception as exc:
+                self._notify_status_async(
+                    f"Failed to start Arduino telemetry: {self._summarise_exception(exc)}",
+                    persist=True,
+                )
+                print("Failed to start Arduino pressure device:", exc)
 
     def _setup_nidaq_device(self, settings) -> PressureDevice:
         if not is_pydaqmx_available():
@@ -454,6 +507,10 @@ class PressureController:
     def active_device_type(self) -> str:
         """Return the lowercase name of the currently active pressure device."""
         return str(self._device_ctx.type_name or "").lower()
+
+    def link_monitor(self) -> Optional[LinkMonitor]:
+        """Expose the Arduino link monitor (if available) for UI badges."""
+        return self._device_ctx.monitor
 
     # ------------------------------------------------------------------
     # Protocol handling (largely retained from previous implementation)
