@@ -27,7 +27,12 @@ def get_resource_path(relative_path: str) -> str:
     any working directory.
     """
     base_path = getattr(sys, "_MEIPASS", _MODULE_ROOT)
-    return os.path.join(base_path, relative_path)
+    candidate_path = os.path.join(base_path, relative_path)
+    if os.path.exists(candidate_path):
+        return candidate_path
+
+    fallback_path = os.path.join(os.path.abspath("."), relative_path)
+    return fallback_path if os.path.exists(fallback_path) else candidate_path
 
 # Resource paths
 images_folder = get_resource_path(os.path.join("images"))
