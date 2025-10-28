@@ -164,14 +164,23 @@ class PressureAdapter:
         protocol will respond.
         """
         self._last_setpoint = float(target_mm_hg)
-        payloads = (
-            f"SET:{target_mm_hg:.2f}\n".encode("ascii"),
-            f"<{int(round(target_mm_hg))}>".encode("ascii"),
+        integer = int(round(target_mm_hg))
+        commands = (
+            f"SET:{target_mm_hg:.2f}",
+            f"<{integer}>",
+            f"P {integer}",
+            f"P:{integer}",
+            f"P={integer}",
+            f"SET P {integer}",
+            f"SET_PRESSURE {integer}",
+            f"sp {integer}",
+            f"SP {integer}",
         )
         with self._lock:
             if not self._serial:
                 return
-            for payload in payloads:
+            for command in commands:
+                payload = f"{command}\n".encode("ascii", errors="ignore")
                 try:
                     self._serial.write(payload)
                 except Exception:  # noqa: BLE001 - ignore transient write failures
