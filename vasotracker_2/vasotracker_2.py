@@ -829,6 +829,18 @@ def safe_var_float(var, default=float("nan")) -> float:
         return default
 
 
+def safe_var_set(var, value) -> None:
+    """Update a Tk variable, ignoring stale callbacks from destroyed widgets."""
+    if var is None:
+        return
+    try:
+        var.set(value)
+    except TclError:
+        pass
+    except Exception:
+        pass
+
+
 @dataclass
 class FutureAndCallbackFlag:
     future: Future
@@ -995,7 +1007,7 @@ class Model:
 
         tb.caliper_roi.roi_flag.set("ROI")
 
-        tb.pressure_protocol.hold_pressure.set(True)
+        safe_var_set(tb.pressure_protocol.hold_pressure, True)
 
         tb.start_stop.record.set(True)
 
@@ -5296,8 +5308,8 @@ class Controller:
         if current_state == 0:
             if tmb.askokcancel("Start Pressure Protocol", "Are you sure?"):
                 start_time = time.time()
-                self.model.state.toolbar.pressure_protocol.protocol_start_time.set(start_time)
-                self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.set(1)
+                safe_var_set(self.model.state.toolbar.pressure_protocol.protocol_start_time, start_time)
+                safe_var_set(self.model.state.toolbar.pressure_protocol.pressure_protocol_flag, 1)
                 if self.model.pressure_controller is not None:
                     # Ensure the controller pulls the latest UI values and sets the initial pressure.
                     self.model.pressure_controller.reset_protocol()
@@ -5305,7 +5317,7 @@ class Controller:
                 self.model.state.app.auto_pressure.set(not current_state)
         else:
             if tmb.askokcancel("Stop Pressure Protocol", "Are you sure?"):
-                self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.set(0)
+                safe_var_set(self.model.state.toolbar.pressure_protocol.pressure_protocol_flag, 0)
                 #self.view.toolbar.pressure_control_settings.toggle_protocol_button()
                 self.model.state.app.auto_pressure.set(not current_state)
                 self.model.pressure_controller.reset_protocol()
@@ -5313,7 +5325,7 @@ class Controller:
     def servo_stop(self):
         if self.model.pressure_controller is None:
             return
-        self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.set(0)
+        safe_var_set(self.model.state.toolbar.pressure_protocol.pressure_protocol_flag, 0)
 
     def decrease_pressure(self):
         increment = safe_var_float(
@@ -5327,7 +5339,7 @@ class Controller:
         new_pressure = current_pressure - increment
         if new_pressure < 0:
             new_pressure = 0
-        self.model.state.toolbar.pressure_protocol.set_pressure.set(f"{new_pressure:.2f}")
+        safe_var_set(self.model.state.toolbar.pressure_protocol.set_pressure, f"{new_pressure:.2f}")
 
     def increase_pressure(self):
         increment = safe_var_float(
@@ -5341,7 +5353,7 @@ class Controller:
         new_pressure = current_pressure + increment
         if new_pressure > 200:
             new_pressure = 200
-        self.model.state.toolbar.pressure_protocol.set_pressure.set(f"{new_pressure:.2f}")
+        safe_var_set(self.model.state.toolbar.pressure_protocol.set_pressure, f"{new_pressure:.2f}")
 
     def start_acq(self):
         current_state = self.model.state.app.acquiring.get()

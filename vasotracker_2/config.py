@@ -14,9 +14,22 @@ from typing import TYPE_CHECKING, Optional, Union
 import toml
 import dacite
 import os
+from tkinter import TclError
 
 if TYPE_CHECKING:
     from vt_mvc import VtState
+
+
+def _safe_set(var, value) -> None:
+    if var is None:
+        return
+    try:
+        var.set(value)
+    except TclError:
+        pass
+    except Exception:
+        pass
+
 
 class Configurator:
     def set_values(self, state: "VtState"):
@@ -38,10 +51,10 @@ class AcquisitionSettings(Configurator):
 
     def set_values(self, state: "VtState"):
         acq = state.toolbar.acq
-        acq.scale.set(self.pixel_world_scale)
-        acq.exposure.set(self.exposure)
-        acq.pixel_clock.set(self.pixel_clock)
-        acq.rec_interval.set(self.recording_interval)
+        _safe_set(acq.scale, self.pixel_world_scale)
+        _safe_set(acq.exposure, self.exposure)
+        _safe_set(acq.pixel_clock, self.pixel_clock)
+        _safe_set(acq.rec_interval, self.recording_interval)
 
     @classmethod
     def from_state(cls, state: "VtState"):
@@ -68,10 +81,10 @@ class AnalysisSettings(Configurator):
 
     def set_values(self, state: "VtState"):
         ana = state.toolbar.analysis
-        ana.num_lines.set(self.num_lines)
-        ana.smooth_factor.set(self.smooth)
-        ana.integration_factor.set(self.integration)
-        ana.thresh_factor.set(self.threshold)
+        _safe_set(ana.num_lines, self.num_lines)
+        _safe_set(ana.smooth_factor, self.smooth)
+        _safe_set(ana.integration_factor, self.integration)
+        _safe_set(ana.thresh_factor, self.threshold)
 
     @classmethod
     def from_state(cls, state: "VtState"):
@@ -93,7 +106,7 @@ class SourceSettings(Configurator):
     file_fps: float = 1.0
 
     def set_values(self, state: "VtState"):
-        state.toolbar.source.file_fps.set(self.file_fps)
+        _safe_set(state.toolbar.source.file_fps, self.file_fps)
 
     @classmethod
     def from_state(cls, state: "VtState"):
@@ -116,12 +129,12 @@ class GraphAxisSettings(Configurator):
 
     def set_values(self, state: "VtState"):
         g = state.toolbar.graph
-        g.x_min.set(self.x_min) #
-        g.x_max.set(self.x_max)
-        g.y_min_od.set(self.y_min1)
-        g.y_max_od.set(self.y_max1)
-        g.y_min_id.set(self.y_min2)
-        g.y_max_id.set(self.y_max2)
+        _safe_set(g.x_min, self.x_min)
+        _safe_set(g.x_max, self.x_max)
+        _safe_set(g.y_min_od, self.y_min1)
+        _safe_set(g.y_max_od, self.y_max1)
+        _safe_set(g.y_min_id, self.y_min2)
+        _safe_set(g.y_max_id, self.y_max2)
     @classmethod
     def from_state(cls, state: "VtState"):
         g = state.toolbar.graph
@@ -163,12 +176,12 @@ class PressureHardwareSettings(Configurator):
 
     def set_values(self, state: "VtState"):
         hardware = state.toolbar.pressure_device
-        hardware.device_type.set(self.device)
-        hardware.port.set(self.port)
-        hardware.baud.set(self.baud)
-        hardware.ni_device.set(self.ni_device)
-        hardware.ni_ao_channel.set(self.ni_ao_channel)
-        hardware.ni_scale.set(self.ni_scale)
+        _safe_set(hardware.device_type, self.device)
+        _safe_set(hardware.port, self.port)
+        _safe_set(hardware.baud, self.baud)
+        _safe_set(hardware.ni_device, self.ni_device)
+        _safe_set(hardware.ni_ao_channel, self.ni_ao_channel)
+        _safe_set(hardware.ni_scale, self.ni_scale)
 
     @classmethod
     def from_state(cls, state: "VtState"):
@@ -193,11 +206,11 @@ class PressureControlSettings(Configurator):
 
     def set_values(self, state: "VtState"):
         p = state.toolbar.pressure_protocol
-        p.pressure_start.set(str(self.start_pressure))
-        p.pressure_stop.set(str(self.stop_pressure))
-        p.pressure_intvl.set(str(self.pressure_interval))
-        p.time_intvl.set(str(self.time_interval))
-        p.set_pressure.set(str(self.default_pressure))
+        _safe_set(p.pressure_start, str(self.start_pressure))
+        _safe_set(p.pressure_stop, str(self.stop_pressure))
+        _safe_set(p.pressure_intvl, str(self.pressure_interval))
+        _safe_set(p.time_intvl, str(self.time_interval))
+        _safe_set(p.set_pressure, str(self.default_pressure))
 
     @classmethod
     def from_state(cls, state: "VtState"):

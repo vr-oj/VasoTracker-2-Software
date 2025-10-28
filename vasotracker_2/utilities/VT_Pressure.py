@@ -212,6 +212,18 @@ class PressureController:
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _set_var_safe(var, value) -> None:
+        """Attempt to set a Tk variable, ignoring stale widget callbacks."""
+        if var is None:
+            return
+        try:
+            var.set(value)
+        except TclError:
+            pass
+        except Exception:
+            pass
+
     def configure_from_state(self, start_immediately: bool = False) -> None:
         """Reconfigure the active device based on toolbar/settings state."""
         settings = getattr(self.model.state.toolbar, "pressure_device", None)
@@ -491,7 +503,7 @@ class PressureController:
 
         self.set_pressure = value
         pressure_protocol_settings = self.model.state.toolbar.pressure_protocol
-        pressure_protocol_settings.set_pressure.set(f"{value:.2f}")
+        self._set_var_safe(pressure_protocol_settings.set_pressure, f"{value:.2f}")
 
         try:
             self._device_ctx.device.set_pressure(value)
@@ -522,7 +534,7 @@ class PressureController:
             pass
 
         if sp is not None:
-            tb.pressure_protocol.set_pressure.set(f"{round(float(sp), 2):.2f}")
+            self._set_var_safe(tb.pressure_protocol.set_pressure, f"{round(float(sp), 2):.2f}")
 
     def get_latest(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         return self._latest
@@ -634,7 +646,7 @@ class PressureController:
                 self.set_pressure = self.start_pressure
                 self.adjust_pressure(self.set_pressure)
             self.multiplier = 1
-            self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.set(0)
+            self._set_var_safe(self.model.state.toolbar.pressure_protocol.pressure_protocol_flag, 0)
             self.reset_protocol()
 
             self.end_protocol()
