@@ -83,6 +83,7 @@ class PressureController:
         self.pressure_start_time: Optional[float] = None
         self.next_pressure_update_time: float = 0.0
         self.multiplier: int = 1
+        self._direction: int = 0
         self.protocol_completed: bool = False
         self.stop_protocol_on_completion: bool = True
         self.completed: bool = False
@@ -557,12 +558,22 @@ class PressureController:
     def initialize_pressure_protocol(self, settings) -> None:
         self.start_pressure = settings.pressure_start.get()
         self.stop_pressure = settings.pressure_stop.get()
-        self.pressure_interval = settings.pressure_intvl.get()
+        try:
+            interval_value = float(settings.pressure_intvl.get())
+        except Exception:
+            interval_value = 0.0
+        self.pressure_interval = abs(interval_value)
         self.pressure_time_interval = settings.time_intvl.get()
         self.pressure_start_time = time.time()
         self.next_pressure_update_time = self.pressure_time_interval
         self.multiplier = 1
         self.protocol_completed = False
+        if self.stop_pressure > self.start_pressure:
+            self._direction = 1
+        elif self.stop_pressure < self.start_pressure:
+            self._direction = -1
+        else:
+            self._direction = 0
 
         self.set_pressure = self.start_pressure
         self.adjust_pressure(self.set_pressure)
@@ -571,30 +582,62 @@ class PressureController:
         self.stop_protocol_on_completion = True
         self.completed = False
 
-        if self.set_pressure < self.stop_pressure:
-            self.set_pressure += self.pressure_interval
-            self.adjust_pressure(self.set_pressure)
-            self.multiplier += 1
+        interval = self.pressure_interval or 0.0
+        if self._direction == 0 or interval <= 0:
+            self.completed = True
         else:
+            step = interval * self._direction
+            next_pressure = self.set_pressure + step
+            if self._direction > 0:
+                if next_pressure >= self.stop_pressure:
+                    if self.set_pressure != self.stop_pressure:
+                        self.set_pressure = self.stop_pressure
+                        self.adjust_pressure(self.set_pressure)
+                    self.completed = True
+                else:
+                    self.set_pressure = next_pressure
+                    self.adjust_pressure(self.set_pressure)
+                    self.multiplier += 1
+            else:
+                if next_pressure <= self.stop_pressure:
+                    if self.set_pressure != self.stop_pressure:
+                        self.set_pressure = self.stop_pressure
+                        self.adjust_pressure(self.set_pressure)
+                    self.completed = True
+                else:
+                    self.set_pressure = next_pressure
+                    self.adjust_pressure(self.set_pressure)
+                    self.multiplier += 1
+
+        if self.completed:
+            self.protocol_completed = True
             if not self.model.state.toolbar.pressure_protocol.hold_pressure.get():
                 self.set_pressure = self.start_pressure
                 self.adjust_pressure(self.set_pressure)
             self.multiplier = 1
-            self.completed = True
             self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.set(0)
             self.reset_protocol()
 
-        if self.completed:
             self.end_protocol()
 
     def reset_protocol(self) -> None:
         settings = self.model.state.toolbar.pressure_protocol
         self.start_pressure = settings.pressure_start.get()
         self.stop_pressure = settings.pressure_stop.get()
-        self.pressure_interval = settings.pressure_intvl.get()
+        try:
+            interval_value = float(settings.pressure_intvl.get())
+        except Exception:
+            interval_value = 0.0
+        self.pressure_interval = abs(interval_value)
         self.pressure_time_interval = settings.time_intvl.get()
         self.set_pressure = settings.set_pressure.get()
         self.pressure_start_time = None
         self.multiplier = 1
         self.next_pressure_update_time = 0
         self.protocol_completed = False
+        if self.stop_pressure > self.start_pressure:
+            self._direction = 1
+        elif self.stop_pressure < self.start_pressure:
+            self._direction = -1
+        else:
+            self._direction = 0

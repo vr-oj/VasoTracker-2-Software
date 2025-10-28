@@ -8,4 +8,4 @@
 ##################################################
 
 
-__version__ = "VasoTracker Tykocki Mod"
+__version__ = "Tykocki Lab MOD"
