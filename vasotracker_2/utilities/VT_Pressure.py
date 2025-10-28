@@ -489,6 +489,7 @@ class PressureController:
     def adjust_pressure(self, pressure_value_mmHg: float, update_table: bool = True) -> None:
         value = max(0.0, min(200.0, float(pressure_value_mmHg)))
 
+        self.set_pressure = value
         pressure_protocol_settings = self.model.state.toolbar.pressure_protocol
         pressure_protocol_settings.set_pressure.set(f"{value:.2f}")
 

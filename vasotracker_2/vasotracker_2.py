@@ -958,6 +958,26 @@ class Model:
         self.table_writer.writerow(self.state.table.headers())
         self.table_file.flush()
 
+    def _resolve_set_pressure(self) -> float:
+        """Return the most recent commanded pressure setpoint."""
+        controller = self.pressure_controller
+        if controller is not None:
+            try:
+                value = float(controller.set_pressure)
+                if not math.isnan(value):
+                    return value
+            except Exception:
+                pass
+            try:
+                _, _, latest_sp = controller.get_latest()
+                if latest_sp is not None:
+                    value = float(latest_sp)
+                    if not math.isnan(value):
+                        return value
+            except Exception:
+                pass
+        return safe_var_float(self.state.toolbar.pressure_protocol.set_pressure, default=np.nan)
+
         tb = self.state.toolbar
         tb.source.path.set(self.output_dir)
         tb.source.filename.set(self.output_filename)
@@ -1430,7 +1450,7 @@ class Model:
 
             set_pressure_store = _to_float_or_nan(latest_sp)
             if math.isnan(set_pressure_store):
-                set_pressure_store = safe_var_float(tb.pressure_protocol.set_pressure, default=np.nan)
+                set_pressure_store = self._resolve_set_pressure()
 
             self.state.measure.append(
                 t=self.time_elapsed,
@@ -1480,9 +1500,7 @@ class Model:
                         avg_pressure_val = float("nan")
                 set_pressure_val = _to_float_or_nan(latest_sp)
                 if math.isnan(set_pressure_val):
-                    set_pressure_val = safe_var_float(
-                        tb.pressure_protocol.set_pressure, default=float("nan")
-                    )
+                    set_pressure_val = self._resolve_set_pressure()
                 try:
                     caliper_length_val = float(tb.data_acq.caliper_length.get())
                 except Exception:
