@@ -190,15 +190,43 @@ class ArduinoPressureDevice:
         v = max(0.0, float(value_mmHg))
         self._last_sent_set_mmHg = v
         if self.worker is not None:
-            self._queue_command(f"SET:{v:.2f}")
-            self._queue_command(f"<{int(round(v))}>")
+            integer = int(round(v))
+            # Send a small burst of command variants so we stay compatible with legacy
+            # sketches that expect different verbs/delimiters.
+            commands = (
+                f"SET:{v:.2f}",
+                f"<{integer}>",
+                f"P {integer}",
+                f"P:{integer}",
+                f"P={integer}",
+                f"SET P {integer}",
+                f"SET_PRESSURE {integer}",
+                f"sp {integer}",
+                f"SP {integer}",
+            )
+            for command in commands:
+                self._queue_command(command)
             return
 
         if not getattr(self.arduino, "is_connected", False):
             return
 
         try:
-            self.arduino.sendData(f"SET:{v:.2f}\n")
+            integer = int(round(v))
+            # Mirror the worker path when running in synchronous/polling mode.
+            commands = (
+                f"SET:{v:.2f}",
+                f"<{integer}>",
+                f"P {integer}",
+                f"P:{integer}",
+                f"P={integer}",
+                f"SET P {integer}",
+                f"SET_PRESSURE {integer}",
+                f"sp {integer}",
+                f"SP {integer}",
+            )
+            for command in commands:
+                self.arduino.sendData(f"{command}\n")
         except Exception:
             pass
 
