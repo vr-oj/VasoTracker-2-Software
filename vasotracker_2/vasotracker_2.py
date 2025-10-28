@@ -101,7 +101,7 @@ from matplotlib.path import Path as MplPath
 import skimage
 import tifffile as tf
 import tkinter as tk
-from tkinter import filedialog, scrolledtext, IntVar, StringVar, DoubleVar, BooleanVar, Scale
+from tkinter import filedialog, scrolledtext, IntVar, StringVar, DoubleVar, BooleanVar, Scale, TclError
 import tkinter.messagebox as tmb
 import tkinter.ttk as ttk
 from tkinter import font
@@ -301,14 +301,14 @@ class PressureDeviceSettingsState:
 
 @dataclass
 class PressureProtocolSettingsState:
-    pressure_start: IntVar = field(default_factory=IntVar)
-    pressure_stop: IntVar = field(default_factory=IntVar)
+    pressure_start: StringVar = field(default_factory=lambda: StringVar(value="0"))
+    pressure_stop: StringVar = field(default_factory=lambda: StringVar(value="0"))
     pressure_protocol_flag: IntVar = field(default_factory=IntVar)
-    pressure_intvl: IntVar = field(default_factory=IntVar)
-    time_intvl: IntVar = field(default_factory=IntVar)
+    pressure_intvl: StringVar = field(default_factory=lambda: StringVar(value="0"))
+    time_intvl: StringVar = field(default_factory=lambda: StringVar(value="0"))
     #countdown: IntVar = field(default_factory=IntVar)
     protocol_start_time: IntVar = field(default_factory=IntVar)
-    set_pressure: IntVar = field(default_factory=IntVar)
+    set_pressure: StringVar = field(default_factory=lambda: StringVar(value="0"))
     pressure_increment: IntVar = field(default_factory=IntVar)
     hold_pressure: BooleanVar = field(default_factory=BooleanVar)
 
@@ -807,6 +807,26 @@ def compute_diameters_and_rasterise(
         raw_im=im,
         rasterised=rasterised,
     )
+
+
+def safe_var_float(var, default=float("nan")) -> float:
+    """Convert a Tk variable to float, tolerating empty or invalid values."""
+    if var is None:
+        return default
+    try:
+        value = var.get()
+    except TclError:
+        return default
+    except Exception:
+        return default
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "":
+            return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 @dataclass
@@ -1410,7 +1430,7 @@ class Model:
 
             set_pressure_store = _to_float_or_nan(latest_sp)
             if math.isnan(set_pressure_store):
-                set_pressure_store = _to_float_or_nan(tb.pressure_protocol.set_pressure.get())
+                set_pressure_store = safe_var_float(tb.pressure_protocol.set_pressure, default=np.nan)
 
             self.state.measure.append(
                 t=self.time_elapsed,
@@ -1460,10 +1480,9 @@ class Model:
                         avg_pressure_val = float("nan")
                 set_pressure_val = _to_float_or_nan(latest_sp)
                 if math.isnan(set_pressure_val):
-                    try:
-                        set_pressure_val = float(tb.pressure_protocol.set_pressure.get())
-                    except Exception:
-                        set_pressure_val = float("nan")
+                    set_pressure_val = safe_var_float(
+                        tb.pressure_protocol.set_pressure, default=float("nan")
+                    )
                 try:
                     caliper_length_val = float(tb.data_acq.caliper_length.get())
                 except Exception:
@@ -2130,12 +2149,12 @@ class Model:
         diams = self.state.diameters
         table = self.state.table
         label = table.label.get()
-        ref_diam = table.ref_diam.get()
-        percentage = (diams.avg_outer_diam / ref_diam) * 100.0
-        percentage_as_str = str(np.round(percentage, 2))
-        if np.isnan(ref_diam) or ref_diam == 0.0:
-            percentage = np.nan
-            percentage_as_str = "-"
+        ref_diam = safe_var_float(table.ref_diam, default=np.nan)
+        percentage = np.nan
+        percentage_as_str = "-"
+        if not np.isnan(ref_diam) and ref_diam != 0.0:
+            percentage = (diams.avg_outer_diam / ref_diam) * 100.0
+            percentage_as_str = str(np.round(percentage, 2))
         tb = self.state.toolbar
         caliper_length = tb.data_acq.caliper_length.get()
 
@@ -5272,20 +5291,32 @@ class Controller:
         self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.set(0)
 
     def decrease_pressure(self):
-        increment = self.model.state.toolbar.pressure_protocol.pressure_increment.get()
-        current_pressure = self.model.state.toolbar.pressure_protocol.set_pressure.get()
+        increment = safe_var_float(
+            self.model.state.toolbar.pressure_protocol.pressure_increment, default=1.0
+        )
+        if increment <= 0:
+            increment = 1.0
+        current_pressure = safe_var_float(
+            self.model.state.toolbar.pressure_protocol.set_pressure, default=0.0
+        )
         new_pressure = current_pressure - increment
         if new_pressure < 0:
             new_pressure = 0
-        self.model.state.toolbar.pressure_protocol.set_pressure.set(new_pressure)
+        self.model.state.toolbar.pressure_protocol.set_pressure.set(f"{new_pressure:.2f}")
 
     def increase_pressure(self):
-        increment = self.model.state.toolbar.pressure_protocol.pressure_increment.get()
-        current_pressure = self.model.state.toolbar.pressure_protocol.set_pressure.get()
+        increment = safe_var_float(
+            self.model.state.toolbar.pressure_protocol.pressure_increment, default=1.0
+        )
+        if increment <= 0:
+            increment = 1.0
+        current_pressure = safe_var_float(
+            self.model.state.toolbar.pressure_protocol.set_pressure, default=0.0
+        )
         new_pressure = current_pressure + increment
         if new_pressure > 200:
             new_pressure = 200
-        self.model.state.toolbar.pressure_protocol.set_pressure.set(new_pressure)
+        self.model.state.toolbar.pressure_protocol.set_pressure.set(f"{new_pressure:.2f}")
 
     def start_acq(self):
         current_state = self.model.state.app.acquiring.get()
@@ -5367,7 +5398,9 @@ class Controller:
         self.model.add_table_row()
 
     def update_set_pressure(self):
-        new_pressure_value = self.model.state.toolbar.pressure_protocol.set_pressure.get()
+        new_pressure_value = safe_var_float(
+            self.model.state.toolbar.pressure_protocol.set_pressure, default=0.0
+        )
         if self.pressure_controller is not None:
             self.pressure_controller.adjust_pressure(new_pressure_value, update_table=True)
 

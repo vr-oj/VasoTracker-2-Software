@@ -193,20 +193,36 @@ class PressureControlSettings(Configurator):
 
     def set_values(self, state: "VtState"):
         p = state.toolbar.pressure_protocol
-        p.pressure_start.set(self.start_pressure)
-        p.pressure_stop.set(self.stop_pressure)
-        p.pressure_intvl.set(self.pressure_interval)
-        p.time_intvl.set(self.time_interval)
-        p.set_pressure.set(self.default_pressure)
+        p.pressure_start.set(str(self.start_pressure))
+        p.pressure_stop.set(str(self.stop_pressure))
+        p.pressure_intvl.set(str(self.pressure_interval))
+        p.time_intvl.set(str(self.time_interval))
+        p.set_pressure.set(str(self.default_pressure))
 
     @classmethod
     def from_state(cls, state: "VtState"):
         p = state.toolbar.pressure_protocol
-        start_p = p.pressure_start.get()
-        stop_p = p.pressure_stop.get()
-        p_interval = p.pressure_intvl.get()
-        t_interval = p.time_intvl.get()
-        default_pressure = p.set_pressure.get()
+        def _to_float(var, fallback: float) -> float:
+            if var is None:
+                return fallback
+            try:
+                value = var.get()
+            except Exception:
+                return fallback
+            if isinstance(value, str):
+                value = value.strip()
+                if value == "":
+                    return fallback
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return fallback
+
+        start_p = _to_float(p.pressure_start, 0.0)
+        stop_p = _to_float(p.pressure_stop, start_p)
+        p_interval = _to_float(p.pressure_intvl, 0.0)
+        t_interval = _to_float(p.time_intvl, 0.0)
+        default_pressure = _to_float(p.set_pressure, start_p)
         return cls(
             default_pressure=default_pressure,
             time_interval=t_interval,

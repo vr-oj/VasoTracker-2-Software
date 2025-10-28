@@ -15,6 +15,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import math
 import time
 import tkinter.messagebox as tmb
+from tkinter import TclError
 
 from .pressure_devices import (
     ArduinoPressureDevice,
@@ -190,6 +191,26 @@ class PressureController:
     def _notify_status_async(self, message: str, *, persist: bool = False, log: bool = True) -> None:
         """Thread-safe wrapper around `_notify_status`."""
         self._dispatch_to_ui(lambda m=message, p=persist, l=log: self._notify_status(m, persist=p, log=l))
+
+    @staticmethod
+    def _var_to_float(var, default: float = 0.0) -> float:
+        """Safely extract a float from a Tk variable, tolerating blanks."""
+        if var is None:
+            return default
+        try:
+            value = var.get()
+        except TclError:
+            return default
+        except Exception:
+            return default
+        if isinstance(value, str):
+            value = value.strip()
+            if value == "":
+                return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     def configure_from_state(self, start_immediately: bool = False) -> None:
         """Reconfigure the active device based on toolbar/settings state."""
@@ -469,7 +490,7 @@ class PressureController:
         value = max(0.0, min(200.0, float(pressure_value_mmHg)))
 
         pressure_protocol_settings = self.model.state.toolbar.pressure_protocol
-        pressure_protocol_settings.set_pressure.set(value)
+        pressure_protocol_settings.set_pressure.set(f"{value:.2f}")
 
         try:
             self._device_ctx.device.set_pressure(value)
@@ -500,7 +521,7 @@ class PressureController:
             pass
 
         if sp is not None:
-            tb.pressure_protocol.set_pressure.set(round(sp, 2))
+            tb.pressure_protocol.set_pressure.set(f"{round(float(sp), 2):.2f}")
 
     def get_latest(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         return self._latest
@@ -556,14 +577,11 @@ class PressureController:
         self.last_update_time = current_time
 
     def initialize_pressure_protocol(self, settings) -> None:
-        self.start_pressure = settings.pressure_start.get()
-        self.stop_pressure = settings.pressure_stop.get()
-        try:
-            interval_value = float(settings.pressure_intvl.get())
-        except Exception:
-            interval_value = 0.0
+        self.start_pressure = self._var_to_float(settings.pressure_start, 0.0)
+        self.stop_pressure = self._var_to_float(settings.pressure_stop, self.start_pressure)
+        interval_value = self._var_to_float(settings.pressure_intvl, 0.0)
         self.pressure_interval = abs(interval_value)
-        self.pressure_time_interval = settings.time_intvl.get()
+        self.pressure_time_interval = self._var_to_float(settings.time_intvl, 0.0)
         self.pressure_start_time = time.time()
         self.next_pressure_update_time = self.pressure_time_interval
         self.multiplier = 1
@@ -622,15 +640,12 @@ class PressureController:
 
     def reset_protocol(self) -> None:
         settings = self.model.state.toolbar.pressure_protocol
-        self.start_pressure = settings.pressure_start.get()
-        self.stop_pressure = settings.pressure_stop.get()
-        try:
-            interval_value = float(settings.pressure_intvl.get())
-        except Exception:
-            interval_value = 0.0
+        self.start_pressure = self._var_to_float(settings.pressure_start, 0.0)
+        self.stop_pressure = self._var_to_float(settings.pressure_stop, self.start_pressure)
+        interval_value = self._var_to_float(settings.pressure_intvl, 0.0)
         self.pressure_interval = abs(interval_value)
-        self.pressure_time_interval = settings.time_intvl.get()
-        self.set_pressure = settings.set_pressure.get()
+        self.pressure_time_interval = self._var_to_float(settings.time_intvl, 0.0)
+        self.set_pressure = self._var_to_float(settings.set_pressure, self.start_pressure)
         self.pressure_start_time = None
         self.multiplier = 1
         self.next_pressure_update_time = 0
