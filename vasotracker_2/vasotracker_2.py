@@ -275,7 +275,7 @@ class DataAcqPaneState:
     inner_diam: DoubleVar = field(default_factory=DoubleVar)
     diam_percent: DoubleVar = field(default_factory=DoubleVar)
     caliper_length: DoubleVar = field(default_factory=DoubleVar)
-    countdown: IntVar = field(default_factory=IntVar)
+    countdown: StringVar = field(default_factory=lambda: StringVar(value="0:00:00"))
 
 
 
