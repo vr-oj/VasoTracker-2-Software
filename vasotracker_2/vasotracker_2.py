@@ -3245,12 +3245,19 @@ class PressureDevicePane(ToolbarPane):
         arduino_state = tk.NORMAL if device == "arduino" else tk.DISABLED
         ni_state = tk.NORMAL if device in ("ni", "ni-daq", "nidaq") else tk.DISABLED
 
-        self.port_entry.configure(state=arduino_state)
-        self.baud_entry.configure(state=arduino_state)
-        self.detect_ports_button.configure(state=arduino_state)
-        self.ni_device_entry.configure(state=ni_state)
-        self.ni_ao_entry.configure(state=ni_state)
-        self.ni_scale_entry.configure(state=ni_state)
+        def _safe_config(widget, **kwargs):
+            try:
+                if widget is not None and int(widget.winfo_exists()):
+                    widget.configure(**kwargs)
+            except tk.TclError:
+                pass
+
+        _safe_config(self.port_entry, state=arduino_state)
+        _safe_config(self.baud_entry, state=arduino_state)
+        _safe_config(self.detect_ports_button, state=arduino_state)
+        _safe_config(self.ni_device_entry, state=ni_state)
+        _safe_config(self.ni_ao_entry, state=ni_state)
+        _safe_config(self.ni_scale_entry, state=ni_state)
         if device != "arduino":
             self._set_port_hint("")
 
