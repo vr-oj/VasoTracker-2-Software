@@ -3,8 +3,8 @@ pixel_world_scale = 1.0
 exposure = 50
 pixel_clock = 10
 recording_interval = 300.0
-refresh_min_interval = 0.2
-refresh_faster_interval = 0.01
+refresh_min_interval = 0.01
+refresh_faster_interval = 0.001
 
 [analysis]
 num_lines = 10

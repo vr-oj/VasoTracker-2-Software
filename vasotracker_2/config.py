@@ -33,7 +33,7 @@ class AcquisitionSettings(Configurator):
     exposure: int = 50
     pixel_clock: int = 10
     recording_interval: float = 300.0
-    refresh_min_interval: float = 0.0000002
+    refresh_min_interval: float = 0.01
     refresh_faster_interval: float = 0.001
 
     def set_values(self, state: "VtState"):
