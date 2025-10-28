@@ -11,6 +11,7 @@ import csv
 import json
 import queue
 import threading
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -43,6 +44,8 @@ class Writer:
         self._csv_tmp_path: Optional[Path] = None
         self._fps_hint = 30
         self._frame_size: Optional[tuple[int, int]] = None
+        self._last_written_setpoint: Optional[float] = None
+        self._stale_setpoint_warned = False
 
     # Lifecycle -----------------------------------------------------------------
     def start(
@@ -76,7 +79,7 @@ class Writer:
         self._csv_tmp_path = self.folder / f"{csv_name}.tmp"
         self._csv_file = open(self._csv_tmp_path, mode="w", newline="", encoding="utf-8")
         self._csv_writer = csv.writer(self._csv_file)
-        self._csv_writer.writerow(["t", "frame", "p1", "p2", "setpoint", "note"])
+        self._csv_writer.writerow(["t", "frame", "p1", "p2", "Set Pressure (mmHg)", "note"])
         self._csv_file.flush()
 
         self._stop_event.clear()
@@ -143,6 +146,21 @@ class Writer:
         note: str = "",
     ) -> None:
         """Queue a telemetry row for writing."""
+        if (
+            note
+            and note.startswith("step_")
+            and setpoint is not None
+            and self._last_written_setpoint is not None
+            and abs(setpoint - self._last_written_setpoint) < 1e-3
+            and not self._stale_setpoint_warned
+        ):
+            logging.warning(
+                "Setpoint marker %s arrived but CSV value did not change (%.2f mmHg).",
+                note,
+                setpoint,
+            )
+            self._stale_setpoint_warned = True
+
         payload = [t, frame_no, p1, p2, setpoint, note]
         try:
             self._telemetry.put_nowait(payload)
@@ -155,6 +173,13 @@ class Writer:
                 self._telemetry.put_nowait(payload)
             except queue.Full:
                 pass
+        if setpoint is not None:
+            if (
+                self._last_written_setpoint is None
+                or abs(setpoint - self._last_written_setpoint) >= 1e-3
+            ):
+                self._stale_setpoint_warned = False
+            self._last_written_setpoint = setpoint
 
     def write_metadata(self, metadata: dict, filename: str = "metadata.json") -> None:
         """

@@ -25,10 +25,10 @@ class StepsEngine:
 
     def __init__(
         self,
-        set_pressure: Callable[[float], None],
+        apply_setpoint: Callable[[float], None],
         on_step_start: Callable[[int, Step], None] | None = None,
     ) -> None:
-        self._set_pressure = set_pressure
+        self._apply_setpoint = apply_setpoint
         self._on_step_start = on_step_start or (lambda index, step: None)
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -66,7 +66,7 @@ class StepsEngine:
         for index, step in enumerate(steps, start=1):
             if self._stop_event.is_set():
                 break
-            self._set_pressure(step.target_mm_hg)
+            self._apply_setpoint(step.target_mm_hg)
             self._on_step_start(index, step)
             self._sleep_with_cancellation(step.dwell_s)
 
@@ -75,4 +75,3 @@ class StepsEngine:
         while time.time() < end_time:
             if self._stop_event.wait(timeout=0.05):
                 return
-

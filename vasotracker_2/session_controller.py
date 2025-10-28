@@ -67,6 +67,8 @@ class SessionController:
         self.session_folder = self._create_session_folder()
         self._frame_size: Optional[Tuple[int, int]] = None
         self._preflight_report: Dict[str, object] = {}
+        self._setpoint_lock = threading.Lock()
+        self._current_target_mmHg: float = 0.0
 
         self.camera = CameraAdapter(
             index=cfg.camera_index,
@@ -76,9 +78,10 @@ class SessionController:
         self.pressure = PressureAdapter(
             port=cfg.serial_port,
             baud=cfg.serial_baud,
+            setpoint_callback=self._on_setpoint_echo,
         )
         self.writer = Writer(str(self.session_folder))
-        self.steps_engine = StepsEngine(self.pressure.set_pressure, on_step_start=self._on_step_start)
+        self.steps_engine = StepsEngine(self.apply_setpoint, on_step_start=self._on_step_start)
 
         self._pump_thread: Optional[threading.Thread] = None
         self._pump_stop = threading.Event()
@@ -181,6 +184,26 @@ class SessionController:
     def preflight_report(self) -> Dict[str, object]:
         return dict(self._preflight_report)
 
+    def apply_setpoint(self, mmHg: float) -> None:
+        """Set the hardware target and mirror it for downstream consumers."""
+        value = float(mmHg)
+        self.pressure.set_pressure(value)
+        self.current_target_mmHg = value
+
+    @property
+    def current_target_mmHg(self) -> float:
+        with self._setpoint_lock:
+            return self._current_target_mmHg
+
+    @current_target_mmHg.setter
+    def current_target_mmHg(self, value: float) -> None:
+        with self._setpoint_lock:
+            self._current_target_mmHg = float(value)
+
+    def _on_setpoint_echo(self, value: float) -> None:
+        """Mirror device-reported targets without issuing a new command."""
+        self.current_target_mmHg = float(value)
+
     # Internal helpers -----------------------------------------------------------
     def _preflight_camera(self) -> Dict[str, object]:
         self.camera.open()
@@ -231,7 +254,13 @@ class SessionController:
                 frame_count += 1
             reading = self.pressure.read(timeout=0.0)
             if reading:
-                writer.push_telemetry(reading.t, None, reading.p1, reading.p2, reading.setpoint)
+                writer.push_telemetry(
+                    reading.t,
+                    None,
+                    reading.p1,
+                    reading.p2,
+                    self.current_target_mmHg,
+                )
                 telem_count += 1
 
         writer.close()
@@ -283,7 +312,13 @@ class SessionController:
                 self.writer.push_frame(frame.t, frame.frame_no, frame.image)
             reading = self.pressure.read(timeout=0.0)
             if reading:
-                self.writer.push_telemetry(reading.t, None, reading.p1, reading.p2, reading.setpoint)
+                self.writer.push_telemetry(
+                    reading.t,
+                    None,
+                    reading.p1,
+                    reading.p2,
+                    self.current_target_mmHg,
+                )
 
     def _on_step_start(self, index: int, step: Step) -> None:
         self.writer.push_telemetry(
@@ -291,7 +326,7 @@ class SessionController:
             None,
             None,
             None,
-            step.target_mm_hg,
+            self.current_target_mmHg,
             note=f"step_{index}_start",
         )
 

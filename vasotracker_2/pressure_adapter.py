@@ -13,7 +13,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple
+from typing import Callable, Iterable, List, Optional, Tuple
 
 import serial
 from serial.tools import list_ports
@@ -61,6 +61,7 @@ class PressureAdapter:
         baud: int = 115200,
         timeout: float = 0.2,
         queue_size: int = 1000,
+        setpoint_callback: Optional[Callable[[float], None]] = None,
     ) -> None:
         self.port = port
         self.baud = baud
@@ -72,6 +73,8 @@ class PressureAdapter:
         self._lock = threading.RLock()
         self.protocol: Optional[str] = None  # "legacy" or "csv"
         self._serial: Optional[serial.Serial] = None
+        self._setpoint_callback = setpoint_callback
+        self._last_notified_setpoint: Optional[float] = None
 
     @staticmethod
     def list_serial_ports() -> List[Tuple[str, str]]:
@@ -164,6 +167,7 @@ class PressureAdapter:
         protocol will respond.
         """
         self._last_setpoint = float(target_mm_hg)
+        self._last_notified_setpoint = float(target_mm_hg)
         integer = int(round(target_mm_hg))
         commands = (
             f"SET:{target_mm_hg:.2f}",
@@ -259,17 +263,32 @@ class PressureAdapter:
             timestamp = time.perf_counter()
             match = self.CSV_REGEX.search(line) or self.LEGACY_REGEX.search(line)
             p1 = p2 = setpoint = None
+            explicit_setpoint: Optional[float] = None
             if match:
-                p1 = float(match.group(1))
-                p2 = float(match.group(2))
+                try:
+                    p1 = float(match.group(1))
+                except (TypeError, ValueError):
+                    p1 = None
+                try:
+                    p2 = float(match.group(2))
+                except (TypeError, ValueError):
+                    p2 = None
                 if match.lastindex and match.group(match.lastindex):
                     try:
-                        setpoint = float(match.group(match.lastindex))
+                        explicit_setpoint = float(match.group(match.lastindex))
                     except ValueError:
-                        setpoint = None
-                if setpoint is None:
-                    setpoint = self._last_setpoint
+                        explicit_setpoint = None
+                if explicit_setpoint is not None:
+                    setpoint = explicit_setpoint
+            else:
+                explicit_setpoint = self._extract_setpoint_echo(line)
+                if explicit_setpoint is not None:
+                    setpoint = explicit_setpoint
+            if setpoint is None:
+                setpoint = self._last_setpoint
             reading = PressureReading(p1=p1, p2=p2, setpoint=setpoint, raw=line, t=timestamp)
+            if explicit_setpoint is not None:
+                self._handle_setpoint_feedback(explicit_setpoint)
             self._publish(reading)
 
     def _publish(self, reading: PressureReading) -> None:
@@ -285,6 +304,41 @@ class PressureAdapter:
                 self._queue.put_nowait(reading)
             except queue.Full:
                 pass
+
+    def _extract_setpoint_echo(self, line: str) -> Optional[float]:
+        """Parse device-emitted setpoint echoes like 'SP:60.0'."""
+        text = line.strip()
+        if not text:
+            return None
+        upper = text.upper()
+        prefix = None
+        for candidate in ("SP:", "SETPOINT:", "TARGET:"):
+            if upper.startswith(candidate):
+                prefix = candidate
+                break
+        if prefix is None:
+            return None
+        try:
+            return float(text[len(prefix) :].strip())
+        except ValueError:
+            return None
+
+    def _handle_setpoint_feedback(self, value: float) -> None:
+        """Update internal caches and notify listeners of a new target."""
+        numeric = float(value)
+        self._last_setpoint = numeric
+        if (
+            self._last_notified_setpoint is not None
+            and abs(self._last_notified_setpoint - numeric) < 1e-3
+        ):
+            return
+        self._last_notified_setpoint = numeric
+        if not self._setpoint_callback:
+            return
+        try:
+            self._setpoint_callback(numeric)
+        except Exception:
+            pass
 
     def _readline(self) -> str:
         """Best-effort UTF-8 decode of a single telemetry line."""
@@ -328,5 +382,3 @@ class PressureAdapter:
                 break
         return hint
 
-
-import queue  # Placed at bottom to avoid circular import at module load time.
