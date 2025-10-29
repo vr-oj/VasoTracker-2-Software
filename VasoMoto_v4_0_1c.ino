@@ -15,6 +15,8 @@
 #include "FreeSansBold9pt7b.h"
 #include <Adafruit_ST7735.h>  // Hardware-specific library
 #include "stepper.h"
+#include <math.h>
+#include <string.h>
 
 /*ADC Setup*/
   ADS1115 ads;
@@ -161,6 +163,20 @@
   const byte numChars = 16;
   char receivedChars[numChars];
   bool newData = false;
+
+// --- Set Pressure echo helpers/state ---
+float last_sp_sent = NAN;            // track last broadcast set pressure
+unsigned long last_sp_broadcast = 0; // timestamp of last broadcast
+int last_sp_bucket = -9999;          // track last bucket broadcast
+const int SP_BUCKET = 20;            // bucket step in mmHg
+
+inline void broadcastSP(float v) {
+  Serial.print("<SP:");
+  Serial.print(v, 1);
+  Serial.println(">");
+  last_sp_sent = v;
+  last_sp_broadcast = millis();
+}
 
 /*Miscellaneous global variables*/
   unsigned long previousMillis = 0;
@@ -351,10 +367,46 @@ void recvWithStartEndMarkers() {
   }
 }
 
+void processCommand() {
+  if (strcmp(receivedChars, "?SP") == 0) {
+    float reportValue = isnan(last_sp_sent) ? (float)sel_pressure : last_sp_sent;
+    broadcastSP(reportValue);
+    newData = false;
+    return;
+  }
+
+  if (receivedChars[0] == 'S' && receivedChars[1] == ':' && receivedChars[2] != '\0') {
+    int v = atoi(receivedChars + 2);
+    encoderPos = v;
+    broadcastSP((float)encoderPos);
+    newData = false;
+    return;
+  }
+
+  bool numeric = true;
+  if (receivedChars[0] == '\0') {
+    numeric = false;
+  } else {
+    for (char *p = receivedChars; *p; ++p) {
+      if (*p < '0' || *p > '9') {
+        numeric = false;
+        break;
+      }
+    }
+  }
+  if (numeric) {
+    encoderPos = atoi(receivedChars);
+    broadcastSP((float)encoderPos);
+    newData = false;
+    return;
+  }
+
+  newData = false;
+}
+
 void showNewData() {
   if (newData == true) {
-    encoderPos = atoi(receivedChars);
-    newData = false;
+    processCommand();
   }
 }
 
@@ -1387,6 +1439,9 @@ void isRunningMoto() {
   recvWithStartEndMarkers();
   showNewData();
   sel_pressure = encoderPos;
+  if (isnan(last_sp_sent) || fabs((float)sel_pressure - last_sp_sent) >= 0.5f) {
+    broadcastSP((float)sel_pressure);
+  }
   currentMillis = millis() - startMillis;
   pressureControl(acceleration);
   if (currentMillis - previousMillis >= timeDelay) {
@@ -1406,6 +1461,9 @@ void isRunningMoto() {
     drawColorBar(coloring, 0, 84, 8, 5);
     previousMillis = currentMillis;
   }
+  if (millis() - last_sp_broadcast > 1000) {
+    broadcastSP((float)sel_pressure);
+  }
   while (digitalRead(enSW) == 0) {
     runStateMoto = 0;
     encoderPos = 0;
@@ -1418,6 +1476,12 @@ void isRunningSim() {
   showNewData();
   currentMillis = millis() - startMillis;
   triangle();
+  int bucketIndex = (sel_pressure + (SP_BUCKET / 2)) / SP_BUCKET;
+  int bucketValue = bucketIndex * SP_BUCKET;
+  if (bucketValue != last_sp_bucket || isnan(last_sp_sent)) {
+    last_sp_bucket = bucketValue;
+    broadcastSP((float)bucketValue);
+  }
   pressureRamp(acceleration);
   if (currentMillis - previousMillis >= timeDelay) {
     currentTime = (currentMillis / 1000.00);
@@ -1436,6 +1500,9 @@ void isRunningSim() {
     sprintf(RunningOutputSim, "<P1:%.2f;P2:%.2f>", avgPressure, avgPressure); //change 2nd one to 'avgTension' once VasoTracker can handle it
     Serial.println(RunningOutputSim);
     previousMillis = currentMillis;
+  }
+  if (millis() - last_sp_broadcast > 1000) {
+    broadcastSP((float)bucketValue);
   }
   while (digitalRead(enSW) == 0) {
     runStateSim = 0;
@@ -1484,6 +1551,9 @@ void isPausedSim() {
   recvWithStartEndMarkers();
   showNewData();
   sel_pressure = encoderPos;
+  if (isnan(last_sp_sent) || fabs((float)sel_pressure - last_sp_sent) >= 0.5f) {
+    broadcastSP((float)sel_pressure);
+  }
   currentMillis = millis() - startMillis;
   pressureControl(acceleration);
   if (currentMillis - previousMillis >= timeDelay) {
@@ -1501,6 +1571,9 @@ void isPausedSim() {
     sprintf(RunningOutputSim, "<P1:%.2f;P2:%.2f>", avgPressure, avgPressure); //change 2nd one to 'avgTension' once VasoTracker can handle it
     Serial.println(RunningOutputSim);
     previousMillis = currentMillis;
+  }
+  if (millis() - last_sp_broadcast > 1000) {
+    broadcastSP((float)sel_pressure);
   }
   while (digitalRead(enSW) == 0) {
       runStateSim = 1;

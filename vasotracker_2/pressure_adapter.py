@@ -8,6 +8,7 @@ detecting the correct protocol during the preflight handshake.
 
 from __future__ import annotations
 
+import math
 import queue
 import re
 import threading
@@ -44,6 +45,10 @@ class PressureAdapter:
     so consumers can poll without blocking the UI thread.
     """
 
+    DATA_REGEX = re.compile(
+        r"DATA\s+T=(\d+)\s+P=([-+\d\.NaN]+)\s+P_SET=([-+\d\.NaN]+)",
+        re.IGNORECASE,
+    )
     LEGACY_REGEX = re.compile(
         r"<\s*P1:(-?\d+\.?\d*)\s*[,;]\s*P2:(-?\d+\.?\d*)"
         r"(?:\s*[,;]\s*SET:(-?\d+\.?\d*))?\s*>",
@@ -166,10 +171,12 @@ class PressureAdapter:
         Update the pressure setpoint. Both command dialects are sent so either
         protocol will respond.
         """
-        self._last_setpoint = float(target_mm_hg)
-        self._last_notified_setpoint = float(target_mm_hg)
+        if self.protocol != "thin":
+            self._last_setpoint = float(target_mm_hg)
         integer = int(round(target_mm_hg))
         commands = (
+            f"SET P={target_mm_hg:.2f}",
+            f"SET P={integer}",
             f"SET:{target_mm_hg:.2f}",
             f"<{integer}>",
             f"P {integer}",
@@ -233,6 +240,9 @@ class PressureAdapter:
             line = self._readline()
             if not line:
                 continue
+            if self.DATA_REGEX.search(line):
+                self.protocol = "thin"
+                return
             if self.LEGACY_REGEX.search(line):
                 self.protocol = "legacy"
                 return
@@ -268,18 +278,23 @@ class PressureAdapter:
             if not line:
                 continue
             timestamp = time.perf_counter()
+            data_match = self.DATA_REGEX.search(line)
+            if data_match:
+                p_meas = self._safe_float(data_match.group(2))
+                p_set = self._safe_float(data_match.group(3))
+                setpoint = p_set if p_set is not None else self._last_setpoint
+                reading = PressureReading(p1=p_meas, p2=None, setpoint=setpoint, raw=line, t=timestamp)
+                if p_set is not None:
+                    self._handle_setpoint_feedback(p_set)
+                self._publish(reading)
+                continue
+
             match = self.CSV_REGEX.search(line) or self.LEGACY_REGEX.search(line)
             p1 = p2 = setpoint = None
             explicit_setpoint: Optional[float] = None
             if match:
-                try:
-                    p1 = float(match.group(1))
-                except (TypeError, ValueError):
-                    p1 = None
-                try:
-                    p2 = float(match.group(2))
-                except (TypeError, ValueError):
-                    p2 = None
+                p1 = self._safe_float(match.group(1))
+                p2 = self._safe_float(match.group(2))
                 if match.lastindex and match.group(match.lastindex):
                     try:
                         explicit_setpoint = float(match.group(match.lastindex))
@@ -297,6 +312,18 @@ class PressureAdapter:
             if explicit_setpoint is not None:
                 self._handle_setpoint_feedback(explicit_setpoint)
             self._publish(reading)
+
+    @staticmethod
+    def _safe_float(value: Optional[str]) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(numeric):
+            return None
+        return numeric
 
     def _publish(self, reading: PressureReading) -> None:
         """Push a reading onto the queue, dropping the oldest on overflow."""

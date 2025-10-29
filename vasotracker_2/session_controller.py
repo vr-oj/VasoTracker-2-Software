@@ -361,7 +361,7 @@ class SessionController:
                     None,
                     reading.p1,
                     reading.p2,
-                    self.current_target_mmHg,
+                    reading.setpoint if reading.setpoint is not None else self.current_target_mmHg,
                 )
                 telem_count += 1
 
@@ -424,7 +424,7 @@ class SessionController:
                     None,
                     reading.p1,
                     reading.p2,
-                    self.current_target_mmHg,
+                    reading.setpoint if reading.setpoint is not None else self.current_target_mmHg,
                 )
             self._maybe_query_device_setpoint(time.time())
 
