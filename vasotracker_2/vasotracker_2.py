@@ -1279,7 +1279,8 @@ class Model:
             except Exception:
                 pass
         self._pending_updates[key] = (var, min_interval)
-        job = self._ui_scheduler(delay_ms, partial(self._flush_smart_var, key))
+        callback = lambda key=key: self._flush_smart_var(key)
+        job = self._ui_scheduler(delay_ms, callback)
         self._deferred_jobs[key] = job
         return True
 
