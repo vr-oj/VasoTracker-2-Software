@@ -12,6 +12,7 @@ import shutil
 import threading
 import time
 from collections import deque
+import logging
 from dataclasses import asdict, dataclass, field
 from enum import Enum, auto
 from pathlib import Path
@@ -22,13 +23,29 @@ try:  # Support running as a script or imported package.
     from .pressure_adapter import PressureAdapter
     from .steps_engine import Step, StepsEngine
     from .writer import Writer
-    from .setpoint_bus import register_setpoint_handler, clear_setpoint_handler
-except ImportError:  # pragma: no cover - fallback for direct script execution
+    from .setpoint_bus import (
+        register_setpoint_handler,
+        clear_setpoint_handler,
+        broadcast_setpoint,
+        register_setpoint_query,
+        clear_setpoint_query,
+    )
+except ImportError as exc:  # pragma: no cover - fallback for direct script execution
+    if __package__:
+        raise
     from camera_adapter import CameraAdapter
     from pressure_adapter import PressureAdapter
     from steps_engine import Step, StepsEngine
     from writer import Writer
-    from setpoint_bus import register_setpoint_handler, clear_setpoint_handler
+    from setpoint_bus import (
+        register_setpoint_handler,
+        clear_setpoint_handler,
+        broadcast_setpoint,
+        register_setpoint_query,
+        clear_setpoint_query,
+    )
+
+logger = logging.getLogger(__name__)
 
 
 class SessionState(Enum):
@@ -73,6 +90,13 @@ class SessionController:
         self._setpoint_lock = threading.Lock()
         self._current_target_mmHg: float = 0.0
         self._setpoint_events: Deque[Tuple[float, str, float]] = deque(maxlen=512)
+        self._last_gui_ts: float = 0.0
+        self._last_echo_ts: float = 0.0
+        self._last_query_ts: float = 0.0
+        self._last_command_value: Optional[float] = None
+        self._debounce_threshold = 0.5
+        self._debounce_window_s = 1.0
+        self._echo_watchdog_s = 2.5
 
         self.camera = CameraAdapter(
             index=cfg.camera_index,
@@ -91,7 +115,8 @@ class SessionController:
         self._pump_stop = threading.Event()
 
         register_setpoint_handler(self._ingest_external_setpoint)
-        self._record_setpoint_event(self._current_target_mmHg, "init")
+        register_setpoint_query(self._handle_refresh_request)
+        self._record_setpoint_event(self._current_target_mmHg, "init", timestamp=time.time())
 
         self._update_metadata_file()
 
@@ -133,6 +158,8 @@ class SessionController:
             fps_hint=self.cfg.camera_fps or 30,
             size=self._frame_size,
         )
+
+        self._issue_setpoint_query("start_recording")
 
         self._pump_stop.clear()
         self._pump_thread = threading.Thread(target=self._pump_loop, daemon=True)
@@ -194,9 +221,13 @@ class SessionController:
     def apply_setpoint(self, mmHg: float, *, source: str = "command", _from_bus: bool = False) -> None:
         """Set the hardware target and mirror it for downstream consumers."""
         value = float(mmHg)
+        now = time.time()
         self.pressure._set_target(value)
         self.current_target_mmHg = value
-        self._record_setpoint_event(value, source)
+        if source not in ("device", "device_echo", "echo"):
+            self._last_gui_ts = now
+            self._last_command_value = value
+        self._record_setpoint_event(value, source or "command", timestamp=now)
 
     @property
     def current_target_mmHg(self) -> float:
@@ -210,15 +241,69 @@ class SessionController:
 
     def _on_setpoint_echo(self, value: float) -> None:
         """Mirror device-reported targets without issuing a new command."""
-        self.current_target_mmHg = float(value)
-        self._record_setpoint_event(float(value), "echo")
+        now = time.time()
+        numeric = float(value)
+        prior = self.current_target_mmHg
+        if (
+            abs(numeric - prior) < self._debounce_threshold
+            and (now - self._last_echo_ts) < self._debounce_window_s
+        ):
+            self._last_echo_ts = now
+            return
+
+        event_source = "device"
+        if self._last_gui_ts and (now - self._last_gui_ts) <= 0.5:
+            event_source = "echo"
+            if (
+                self._last_command_value is not None
+                and abs(numeric - self._last_command_value) > 1.0
+            ):
+                logger.warning(
+                    "Setpoint echo %.2f mmHg diverges from last command %.2f mmHg",
+                    numeric,
+                    self._last_command_value,
+                )
+
+        self.current_target_mmHg = numeric
+        self._last_echo_ts = now
+        self._record_setpoint_event(numeric, event_source, timestamp=now)
+        if event_source == "echo":
+            self._last_command_value = numeric
 
     def _ingest_external_setpoint(self, value: float, source: str) -> None:
         """Proxy for setpoint_bus to route commands through this controller."""
         self.apply_setpoint(value, source=source, _from_bus=True)
 
-    def _record_setpoint_event(self, value: float, source: str) -> None:
-        self._setpoint_events.append((time.time(), source, float(value)))
+    def _record_setpoint_event(self, value: float, source: str, *, timestamp: Optional[float] = None) -> None:
+        ts = timestamp if timestamp is not None else time.time()
+        self._setpoint_events.append((ts, source, float(value)))
+        try:
+            broadcast_setpoint(value, source)
+        except Exception:
+            pass
+
+    def _handle_refresh_request(self) -> None:
+        self._issue_setpoint_query("ui-refresh")
+
+    def _issue_setpoint_query(self, reason: str = "") -> None:
+        """Ask the adapter to report its current setpoint."""
+        if not hasattr(self.pressure, "query_setpoint"):
+            return
+        try:
+            self.pressure.query_setpoint()  # type: ignore[attr-defined]
+            self._last_query_ts = time.time()
+            if reason:
+                logger.debug("Issued setpoint query (%s)", reason)
+        except Exception as exc:
+            logger.debug("Setpoint query failed: %s", exc)
+
+    def _maybe_query_device_setpoint(self, now: float) -> None:
+        """Watchdog to keep device/app setpoints in sync."""
+        if now - self._last_echo_ts <= self._echo_watchdog_s:
+            return
+        if now - self._last_query_ts <= 2.0:
+            return
+        self._issue_setpoint_query("watchdog")
 
     # Internal helpers -----------------------------------------------------------
     def _preflight_camera(self) -> Dict[str, object]:
@@ -237,6 +322,7 @@ class SessionController:
 
     def _preflight_pressure(self) -> Dict[str, object]:
         self.pressure.connect()
+        self._issue_setpoint_query("preflight")
         reading = self.pressure.read(timeout=0.5)
         info = {
             "port": self.pressure.port,
@@ -317,8 +403,9 @@ class SessionController:
             "session_folder": str(self.session_folder),
             "state": self.state.name,
             "preflight": self._preflight_report,
+            "setpoint_policy": "last-writer-wins",
             "setpoint_events": [
-                {"timestamp": ts, "source": src, "mmHg": val}
+                {"t": ts, "value": val, "source": src}
                 for ts, src, val in self._setpoint_events
             ],
         }
@@ -339,6 +426,7 @@ class SessionController:
                     reading.p2,
                     self.current_target_mmHg,
                 )
+            self._maybe_query_device_setpoint(time.time())
 
     def _on_step_start(self, index: int, step: Step) -> None:
         self.writer.push_telemetry(
@@ -369,5 +457,9 @@ class SessionController:
     def __del__(self) -> None:
         try:
             clear_setpoint_handler(self._ingest_external_setpoint)
+        except Exception:
+            pass
+        try:
+            clear_setpoint_query(self._handle_refresh_request)
         except Exception:
             pass

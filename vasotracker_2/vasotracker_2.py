@@ -114,6 +114,11 @@ from utilities.VT_NavBar import CustomVTToolbar
 from utilities.VasoTrackerSplashScreen import VasoTrackerSplashScreen
 from utilities.ToolTip import ToolTip
 from utilities.VT_Pressure import PressureController, is_pydaqmx_available
+
+try:
+    from .setpoint_bus import add_setpoint_listener, remove_setpoint_listener, request_setpoint_refresh
+except ImportError:
+    from setpoint_bus import add_setpoint_listener, remove_setpoint_listener, request_setpoint_refresh
 from cameras import Camera, CameraBase
 from config import AcquisitionSettings, Config, GraphAxisSettings
 import customtkinter as ctk
@@ -311,6 +316,8 @@ class PressureProtocolSettingsState:
     set_pressure: StringVar = field(default_factory=lambda: StringVar(value="0"))
     pressure_increment: IntVar = field(default_factory=IntVar)
     hold_pressure: BooleanVar = field(default_factory=BooleanVar)
+    device_set_pressure: StringVar = field(default_factory=lambda: StringVar(value="0.0"))
+    device_set_source: StringVar = field(default_factory=lambda: StringVar(value="init"))
 
 @dataclass
 class StartStopState:
@@ -3382,9 +3389,54 @@ class PressureControlPane(ToolbarPane):
         self.set_pressure_button.grid(row=1, column=3, padx=padx, pady=(8,0))
         self.set_pressure_button.image = self.set_pressure_img  # Keep a reference
 
+        self._colour_neutral = "#B0BEC5"
+        self._colour_amber = "#f39c12"
+        self._colour_green = "#2ecc71"
+        sv.device_set_pressure.set("0.0")
+        sv.device_set_source.set("init")
+        self._device_display_var = tk.StringVar(value="Device set pressure: 0.0 mmHg")
+        self._pending_gui_event = False
+        self._last_gui_event_ts = 0.0
+        self._listener_removed = False
+
+        self._recent_events = deque(maxlen=5)
+        self._debug_visible = False
+
+        self.device_set_label = ctk.CTkLabel(
+            self,
+            textvariable=self._device_display_var,
+            font=(default_font, default_font_size),
+            text_color=self._colour_neutral,
+        )
+        self.device_set_label.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
+        self.debug_toggle_button = ctk.CTkButton(
+            self,
+            text="ℹ",
+            width=BUTTON_WIDTH,
+            height=BUTTON_HEIGHT,
+            command=self._toggle_debug_overlay,
+        )
+        self.debug_toggle_button.grid(row=2, column=2, padx=padx, pady=(6, 0))
+        self.refresh_setpoint_button = ctk.CTkButton(
+            self,
+            text="↻",
+            width=BUTTON_WIDTH,
+            height=BUTTON_HEIGHT,
+            command=self._request_device_refresh,
+        )
+        self.refresh_setpoint_button.grid(row=2, column=3, padx=padx, pady=(6, 0))
+        self.debug_overlay = ctk.CTkLabel(
+            self,
+            text="",
+            justify=tk.LEFT,
+            font=(default_font, default_font_size - 2),
+            text_color=self._colour_neutral,
+        )
+        self.debug_overlay.grid(row=7, column=0, columnspan=4, sticky=tk.W, padx=padx, pady=(4, 0))
+        self.debug_overlay.grid_remove()
 
 
-        ctk.CTkLabel(self, text="Manual control:", font=(default_font, default_font_size)).grid(row=2, column=0, columnspan=4, sticky=tk.W)
+        ctk.CTkLabel(self, text="Manual control:", font=(default_font, default_font_size)).grid(row=3, column=0, columnspan=4, sticky=tk.W)
 
         # Recessed Entry
         self.outer_diam_entry = ctk.CTkEntry(
@@ -3398,22 +3450,22 @@ class PressureControlPane(ToolbarPane):
             placeholder_text_color=entry_placeholder_color,
             state=tk.DISABLED,
         )
-        self.outer_diam_entry.grid(row=3, column=1, columnspan=2)  # Span two columns
+        self.outer_diam_entry.grid(row=4, column=1, columnspan=2)  # Span two columns
 
         self.minus_img = self.resize_img(os.path.join(images_folder, 'Subtract Button Black.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
         self.minus_button = ctk.CTkButton(self, image=self.minus_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH)
-        self.minus_button.grid(row=3, column=0, padx=padx, pady=pady)
+        self.minus_button.grid(row=4, column=0, padx=padx, pady=pady)
         self.minus_button.image = self.minus_img  # Keep a reference
 
         self.add_img = self.resize_img(os.path.join(images_folder, 'Add Button Black.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
         self.add_button = ctk.CTkButton(self, image=self.add_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH,)
-        self.add_button.grid(row=3, column=3, padx=(5,5), pady=pady)
+        self.add_button.grid(row=4, column=3, padx=(5,5), pady=pady)
         self.add_button.image = self.add_img  # Keep a reference
 
-        ctk.CTkLabel(self, text="Increment change:", font=(default_font, default_font_size)).grid(row=4, column=0, columnspan=4, sticky=tk.W)
+        ctk.CTkLabel(self, text="Increment change:", font=(default_font, default_font_size)).grid(row=5, column=0, columnspan=4, sticky=tk.W)
 
         self.pressure_increment_entry = ctk.CTkSlider(self, from_=1, to=20, variable=sv.pressure_increment, width=120)
-        self.pressure_increment_entry.grid(row=5, column=0, padx=padx, columnspan=2)  # Span two columns
+        self.pressure_increment_entry.grid(row=6, column=0, padx=padx, columnspan=2)  # Span two columns
 
         self.slider_value_entry = ctk.CTkEntry(
             self,
@@ -3426,7 +3478,7 @@ class PressureControlPane(ToolbarPane):
             placeholder_text_color=entry_placeholder_color,
             state=tk.DISABLED,
         )
-        self.slider_value_entry.grid(row=5, column=2, padx=padx, columnspan=2, sticky="w")  # Span two columns
+        self.slider_value_entry.grid(row=6, column=2, padx=padx, columnspan=2, sticky="w")  # Span two columns
 
         self.model_vars.app.auto_pressure.trace_add(
             "write", lambda *args: self.start_protocol_button_state_callback()
@@ -3450,6 +3502,8 @@ class PressureControlPane(ToolbarPane):
             self.start_protocol_button: "Start pressure ramp experiment.",
             self.set_pressure_button: "Set pressure to indicated value.",
             self.pressure_settings_button: "Open pressure protocol settings.",
+            self.debug_toggle_button: "Toggle recent setpoint event diagnostics.",
+            self.refresh_setpoint_button: "Query the hardware for its reported setpoint.",
             self.outer_diam_entry: "Click -/+ buttons to change desired pressure.",
             self.pressure_increment_entry: "Slide to increase pressure increment.",
         }
@@ -3458,6 +3512,8 @@ class PressureControlPane(ToolbarPane):
             tooltip.register(widget, text)
 
         self.set_lock_state()
+        add_setpoint_listener(self._handle_setpoint_event)
+        self.bind("<Destroy>", self._on_destroy, add="+")
 
 
     def start_protocol_button_state_callback(self):
@@ -3506,6 +3562,82 @@ class PressureControlPane(ToolbarPane):
     def enable_buttons(self):
         self.start_protocol_button.configure(state=tk.NORMAL)
         self.set_pressure_button.configure(state=tk.NORMAL)
+
+    def _request_device_refresh(self) -> None:
+        if not request_setpoint_refresh():
+            controller = getattr(self.model_vars, "pressure_controller", None)
+            if controller is not None:
+                controller.notify_status(
+                    "No active session to refresh setpoint.", log=False
+                )
+
+    def _handle_setpoint_event(self, value: float, source: str) -> None:
+        def update() -> None:
+            protocol = self.model_vars.toolbar.pressure_protocol
+            protocol.device_set_pressure.set(f"{float(value):.1f}")
+            protocol.device_set_source.set(source)
+            self._device_display_var.set(f"Device set pressure: {float(value):.1f} mmHg")
+
+            now = time.time()
+            lower_source = (source or "").lower()
+            if lower_source in {"command", "gui", "pressurecontroller", "script"}:
+                self._pending_gui_event = True
+                self._last_gui_event_ts = now
+                self._apply_device_state(self._colour_neutral)
+            elif lower_source == "echo":
+                if self._pending_gui_event and (now - self._last_gui_event_ts) <= 0.5:
+                    self._apply_device_state(self._colour_green)
+                else:
+                    self._apply_device_state(self._colour_neutral)
+                self._pending_gui_event = False
+            elif lower_source in {"device", "device_echo"}:
+                self._pending_gui_event = False
+                self._apply_device_state(self._colour_amber)
+            else:
+                self._apply_device_state(self._colour_neutral)
+
+            self._recent_events.append((now, lower_source, float(value)))
+            self._refresh_debug_overlay()
+
+        self.after(0, update)
+
+    def _apply_device_state(self, colour: str) -> None:
+        try:
+            self.device_set_label.configure(text_color=colour)
+        except tk.TclError:
+            pass
+
+    def _toggle_debug_overlay(self) -> None:
+        self._debug_visible = not self._debug_visible
+        if self._debug_visible:
+            self.debug_overlay.grid()
+            self._refresh_debug_overlay()
+        else:
+            self.debug_overlay.grid_remove()
+
+    def _refresh_debug_overlay(self) -> None:
+        if not self._debug_visible:
+            return
+        if not self._recent_events:
+            text = "No recent setpoint events."
+        else:
+            lines = []
+            for ts, src, val in reversed(self._recent_events):
+                timestamp = time.strftime("%H:%M:%S", time.localtime(ts))
+                lines.append(f"{timestamp}  {src}: {val:.1f} mmHg")
+            text = "\n".join(lines)
+        try:
+            self.debug_overlay.configure(text=text)
+        except tk.TclError:
+            pass
+
+    def _on_destroy(self, event) -> None:
+        if self._listener_removed:
+            return
+        if event.widget is not self:
+            return
+        remove_setpoint_listener(self._handle_setpoint_event)
+        self._listener_removed = True
 
 
     def toggle_protocol_button(self):

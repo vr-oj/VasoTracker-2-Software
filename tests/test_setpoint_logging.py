@@ -161,6 +161,7 @@ class DummyPressureAdapter:
         self.setpoint_callback = setpoint_callback
         self.last_command: Optional[float] = None
         self.protocol: Optional[str] = "csv"
+        self.queries: list[str] = []
 
     def connect(self) -> None:
         return None
@@ -176,6 +177,9 @@ class DummyPressureAdapter:
 
     def _set_target(self, target_mm_hg: float) -> None:
         self.last_command = float(target_mm_hg)
+
+    def query_setpoint(self) -> None:
+        self.queries.append("query")
 
     def queue_reading(self, reading: PressureReading) -> None:
         self._queue.put(reading)
@@ -241,8 +245,61 @@ def test_setpoint_logged_each_step(tmp_path, monkeypatch) -> None:
         session._pump_stop.set()
         pump.join(timeout=1.0)
         setpoint_bus.clear_setpoint_handler(session._ingest_external_setpoint)  # type: ignore[attr-defined]
+        setpoint_bus.clear_setpoint_query(session._handle_refresh_request)  # type: ignore[attr-defined]
 
     recorded = [row[4] for row in writer.telemetry_rows]
     assert recorded[: len(commanded)] == commanded
     assert recorded[-1] == pytest.approx(65.0, abs=1e-6)
     assert len(set(recorded)) == len(commanded) + 1
+
+
+def test_echo_last_writer_wins(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(sc_module, "CameraAdapter", DummyCameraAdapter)
+    monkeypatch.setattr(sc_module, "Writer", DummyWriter)
+    monkeypatch.setattr(sc_module, "PressureAdapter", DummyPressureAdapter)
+
+    cfg = SessionConfig(base_folder=str(tmp_path))
+    session = SessionController(cfg)
+    pressure: DummyPressureAdapter = session.pressure  # type: ignore[assignment]
+
+    session.apply_setpoint(60.0, source="GUI")
+    pressure.emit_setpoint(59.8)
+    assert session.current_target_mmHg == pytest.approx(59.8, abs=1e-6)
+
+    setpoint_bus.clear_setpoint_handler(session._ingest_external_setpoint)  # type: ignore[attr-defined]
+    setpoint_bus.clear_setpoint_query(session._handle_refresh_request)  # type: ignore[attr-defined]
+
+
+def test_setpoint_jitter_debounced(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(sc_module, "CameraAdapter", DummyCameraAdapter)
+    monkeypatch.setattr(sc_module, "Writer", DummyWriter)
+    monkeypatch.setattr(sc_module, "PressureAdapter", DummyPressureAdapter)
+
+    cfg = SessionConfig(base_folder=str(tmp_path))
+    session = SessionController(cfg)
+    pressure: DummyPressureAdapter = session.pressure  # type: ignore[assignment]
+
+    session.apply_setpoint(40.0, source="GUI")
+    pressure.emit_setpoint(40.0)
+    baseline_events = len(session._setpoint_events)
+
+    for delta in (0.2, -0.1, 0.15):
+        pressure.emit_setpoint(40.0 + delta)
+
+    assert len(session._setpoint_events) == baseline_events
+
+    setpoint_bus.clear_setpoint_handler(session._ingest_external_setpoint)  # type: ignore[attr-defined]
+    setpoint_bus.clear_setpoint_query(session._handle_refresh_request)  # type: ignore[attr-defined]
+
+
+def test_notify_without_session_safe(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(sc_module, "CameraAdapter", DummyCameraAdapter)
+    monkeypatch.setattr(sc_module, "Writer", DummyWriter)
+    monkeypatch.setattr(sc_module, "PressureAdapter", DummyPressureAdapter)
+
+    cfg = SessionConfig(base_folder=str(tmp_path))
+    session = SessionController(cfg)
+    setpoint_bus.clear_setpoint_handler(session._ingest_external_setpoint)  # type: ignore[attr-defined]
+    setpoint_bus.clear_setpoint_query(session._handle_refresh_request)  # type: ignore[attr-defined]
+
+    assert setpoint_bus.notify_setpoint(55.0, "test") is False

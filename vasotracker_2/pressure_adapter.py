@@ -312,6 +312,16 @@ class PressureAdapter:
             except queue.Full:
                 pass
 
+    def query_setpoint(self) -> None:
+        """Request the device to emit its current target setpoint."""
+        with self._lock:
+            if not self._serial:
+                return
+            try:
+                self._serial.write(b"?SP\n")
+            except Exception:
+                return
+
     def _extract_setpoint_echo(self, line: str) -> Optional[float]:
         """Parse device-emitted setpoint echoes like 'SP:60.0'."""
         text = line.strip()
