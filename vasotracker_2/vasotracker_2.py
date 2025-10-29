@@ -3726,29 +3726,7 @@ class PressureControlPane(ToolbarPane):
         self._recent_events = deque(maxlen=5)
         self._debug_visible = False
 
-        self.device_set_label = ctk.CTkLabel(
-            self,
-            textvariable=self._device_display_var,
-            font=(default_font, default_font_size),
-            text_color=self._colour_neutral,
-        )
-        self.device_set_label.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
-        self.debug_toggle_button = ctk.CTkButton(
-            self,
-            text="ℹ",
-            width=BUTTON_WIDTH,
-            height=BUTTON_HEIGHT,
-            command=self._toggle_debug_overlay,
-        )
-        self.debug_toggle_button.grid(row=2, column=2, padx=padx, pady=(6, 0))
-        self.refresh_setpoint_button = ctk.CTkButton(
-            self,
-            text="↻",
-            width=BUTTON_WIDTH,
-            height=BUTTON_HEIGHT,
-            command=self._request_device_refresh,
-        )
-        self.refresh_setpoint_button.grid(row=2, column=3, padx=padx, pady=(6, 0))
+        self.device_set_label = None
         self.debug_overlay = ctk.CTkLabel(
             self,
             text="",
@@ -3760,7 +3738,7 @@ class PressureControlPane(ToolbarPane):
         self.debug_overlay.grid_remove()
 
 
-        ctk.CTkLabel(self, text="Manual control:", font=(default_font, default_font_size)).grid(row=3, column=0, columnspan=4, sticky=tk.W)
+        ctk.CTkLabel(self, text="Manual control:", font=(default_font, default_font_size)).grid(row=2, column=0, columnspan=4, sticky=tk.W)
 
         self._suppress_manual_slider = False
         initial_setpoint = safe_var_float(sv.set_pressure, default=0.0)
@@ -3772,7 +3750,7 @@ class PressureControlPane(ToolbarPane):
             width=260,
             command=self._on_manual_slider,
         )
-        self.manual_slider.grid(row=4, column=0, columnspan=4, padx=padx, pady=(4, 6), sticky="ew")
+        self.manual_slider.grid(row=3, column=0, columnspan=4, padx=padx, pady=(4, 6), sticky="ew")
         self.manual_slider.set(initial_setpoint)
 
         # Recessed Entry
@@ -3787,22 +3765,22 @@ class PressureControlPane(ToolbarPane):
             placeholder_text_color=entry_placeholder_color,
             state=tk.DISABLED,
         )
-        self.outer_diam_entry.grid(row=5, column=1, columnspan=2)  # Span two columns
+        self.outer_diam_entry.grid(row=4, column=1, columnspan=2)  # Span two columns
 
         self.minus_img = self.resize_img(os.path.join(images_folder, 'Subtract Button Black.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
         self.minus_button = ctk.CTkButton(self, image=self.minus_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH)
-        self.minus_button.grid(row=5, column=0, padx=padx, pady=pady)
+        self.minus_button.grid(row=4, column=0, padx=padx, pady=pady)
         self.minus_button.image = self.minus_img  # Keep a reference
 
         self.add_img = self.resize_img(os.path.join(images_folder, 'Add Button Black.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
         self.add_button = ctk.CTkButton(self, image=self.add_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH,)
-        self.add_button.grid(row=5, column=3, padx=(5,5), pady=pady)
+        self.add_button.grid(row=4, column=3, padx=(5,5), pady=pady)
         self.add_button.image = self.add_img  # Keep a reference
 
-        ctk.CTkLabel(self, text="Increment change:", font=(default_font, default_font_size)).grid(row=6, column=0, columnspan=4, sticky=tk.W)
+        ctk.CTkLabel(self, text="Increment change:", font=(default_font, default_font_size)).grid(row=5, column=0, columnspan=4, sticky=tk.W)
 
         self.pressure_increment_entry = ctk.CTkSlider(self, from_=1, to=20, variable=sv.pressure_increment, width=120)
-        self.pressure_increment_entry.grid(row=7, column=0, padx=padx, columnspan=2)  # Span two columns
+        self.pressure_increment_entry.grid(row=6, column=0, padx=padx, columnspan=2)  # Span two columns
 
         self.slider_value_entry = ctk.CTkEntry(
             self,
@@ -3815,7 +3793,7 @@ class PressureControlPane(ToolbarPane):
             placeholder_text_color=entry_placeholder_color,
             state=tk.DISABLED,
         )
-        self.slider_value_entry.grid(row=7, column=2, padx=padx, columnspan=2, sticky="w")  # Span two columns
+        self.slider_value_entry.grid(row=6, column=2, padx=padx, columnspan=2, sticky="w")  # Span two columns
 
         self.model_vars.app.auto_pressure.trace_add(
             "write", lambda *args: self.start_protocol_button_state_callback()
@@ -3839,8 +3817,6 @@ class PressureControlPane(ToolbarPane):
             self.start_protocol_button: "Start pressure ramp experiment.",
             self.set_pressure_button: "Set pressure to indicated value.",
             self.pressure_settings_button: "Open pressure protocol settings.",
-            self.debug_toggle_button: "Toggle recent setpoint event diagnostics.",
-            self.refresh_setpoint_button: "Query the hardware for its reported setpoint.",
             self.outer_diam_entry: "Click -/+ buttons to change desired pressure.",
             self.pressure_increment_entry: "Slide to increase pressure increment.",
         }
@@ -3958,8 +3934,11 @@ class PressureControlPane(ToolbarPane):
         self.after(0, update)
 
     def _apply_device_state(self, colour: str) -> None:
+        label = getattr(self, "device_set_label", None)
+        if label is None:
+            return
         try:
-            self.device_set_label.configure(text_color=colour)
+            label.configure(text_color=colour)
         except tk.TclError:
             pass
 
