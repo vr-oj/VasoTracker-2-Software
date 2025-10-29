@@ -232,7 +232,12 @@ static void _vm_handle_line(const String& s) {
         int p_int = (int)(p + 0.5f);
         // Update the existing target variable your sketch already uses:
         sel_pressure = p_int;
-        _vm_pcActive = true;           // PC is actively driving now
+        _vm_pcActive = true;
+        // Ensure device is in Motor RUN state when commanded from PC
+        moto = true;
+        runStateMoto = 1;
+        startMillis = millis();
+           // PC is actively driving now
         _vm_lastSetMs = millis();
         _vm_send_ack(p_int);
       }

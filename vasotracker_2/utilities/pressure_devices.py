@@ -145,11 +145,20 @@ class ArduinoPressureDevice:
         self._pattern = re.compile(
             r"P1:(-?\d+\.?\d*),\s*P2:(-?\d+\.?\d*),\s*SET:(-?\d+\.?\d*)"
         )
+        self._vm_pattern = re.compile(
+            r"^DATA\s+T=(\d+)\s+P=([\d\.\-NaN]+)\s+P_SET=([\d\.\-NaN]+)",
+            re.IGNORECASE,
+        )
+        self._vm_ack_pattern = re.compile(
+            r"^ACK\s+SET\s+P=([\d\.\-]+)\s+T=(\d+)",
+            re.IGNORECASE,
+        )
         self._pattern_legacy = re.compile(
             r"<\s*P1:(-?\d+\.?\d*)\s*[,;]\s*P2:(-?\d+\.?\d*)\s*(?:[,;]\s*SET:(-?\d+\.?\d*))?\s*>"
         )
         self._last_sent_set_mmHg: Optional[float] = None
         self._interval = 1.0 / max(1.0, stream_rate_hz)
+        self._vm_last_device_time: Optional[float] = None
 
     def bind_worker(self, worker: ArduinoSerialWorker) -> None:
         """Attach an async serial worker after construction."""
@@ -200,6 +209,8 @@ class ArduinoPressureDevice:
                 f"P:{integer}",
                 f"P={integer}",
                 f"SET P {integer}",
+                f"SET P={v:.1f}",
+                f"SET P={integer}",
                 f"SET_PRESSURE {integer}",
                 f"sp {integer}",
                 f"SP {integer}",
@@ -221,6 +232,8 @@ class ArduinoPressureDevice:
                 f"P:{integer}",
                 f"P={integer}",
                 f"SET P {integer}",
+                f"SET P={v:.1f}",
+                f"SET P={integer}",
                 f"SET_PRESSURE {integer}",
                 f"sp {integer}",
                 f"SP {integer}",
@@ -254,6 +267,20 @@ class ArduinoPressureDevice:
     def _process_line(self, s: str) -> None:
         if not s:
             return
+        if vm_match := self._vm_pattern.match(s):
+            _, p_raw, sp_raw = vm_match.groups()
+            p = self._safe_float(p_raw)
+            sp = self._safe_float(sp_raw)
+            self._latest = (p, None, sp)
+            return
+        if ack_match := self._vm_ack_pattern.match(s):
+            sp = self._safe_float(ack_match.group(1))
+            if sp is None or (isinstance(sp, float) and sp != sp):
+                return
+            self._latest = (self._latest[0], self._latest[1], sp)
+            self._last_sent_set_mmHg = sp
+            return
+
         match = self._pattern.search(s)
         match_legacy = None
         sp: Optional[float] = None
@@ -273,6 +300,18 @@ class ArduinoPressureDevice:
                 previous = self._latest[2]
                 sp = previous if previous is not None else self._last_sent_set_mmHg
             self._latest = (p1, p2, sp)
+
+    @staticmethod
+    def _safe_float(value: Optional[str]) -> Optional[float]:
+        if value is None:
+            return None
+        raw = value.strip()
+        if raw.lower() == "nan":
+            return float("nan")
+        try:
+            return float(raw)
+        except ValueError:
+            return None
 
     def _queue_command(self, text: str) -> None:
         payload = text if text.endswith("\n") else f"{text}\n"
