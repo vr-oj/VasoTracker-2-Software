@@ -211,6 +211,7 @@
 // Device -> Host:  "ACK SET P=<mmHg> T=<ms>"
 // Telemetry @ 25 Hz: "DATA T=<ms> P=<avgPressure> P_SET=<sel_pressure>"
 static const uint16_t VM_TELEMETRY_HZ = 25;      // DATA lines per second
+static const unsigned long VM_PC_TIMEOUT_MS = 3000;  // allow a longer grace period for PC control
 static unsigned long _vm_nextDataMs = 0;
 static bool _vm_pcActive = false;
 static unsigned long _vm_lastSetMs = 0;                // becomes true when a PC SET is received
@@ -232,6 +233,7 @@ static void _vm_handle_line(const String& s) {
         int p_int = (int)(p + 0.5f);
         // Update the existing target variable your sketch already uses:
         sel_pressure = p_int;
+        encoderPos = sel_pressure;       // keep the front-panel encoder in sync with PC commands
         _vm_pcActive = true;
         // Ensure device is in Motor RUN state when commanded from PC
         moto = true;
@@ -321,10 +323,10 @@ void loop() {
     }
   }
   // === End parser ===
-  // Front-panel takeover if PC inactive for > 1500 ms
+  // Front-panel takeover if PC inactive for longer than the grace period.
   if (_vm_pcActive) {
     unsigned long now_ms = millis();
-    if (now_ms - _vm_lastSetMs > 1500) {
+    if (now_ms - _vm_lastSetMs > VM_PC_TIMEOUT_MS) {
       _vm_pcActive = false;
     }
   }
