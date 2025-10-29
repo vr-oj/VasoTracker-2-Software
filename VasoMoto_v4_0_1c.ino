@@ -212,7 +212,8 @@
 // Telemetry @ 25 Hz: "DATA T=<ms> P=<avgPressure> P_SET=<sel_pressure>"
 static const uint16_t VM_TELEMETRY_HZ = 25;      // DATA lines per second
 static unsigned long _vm_nextDataMs = 0;
-static bool _vm_pcActive = false;                // becomes true when a PC SET is received
+static bool _vm_pcActive = false;
+static unsigned long _vm_lastSetMs = 0;                // becomes true when a PC SET is received
 static String _vm_line;                          // tiny line buffer
 
 static void _vm_send_ack(int p_int) {
@@ -232,6 +233,7 @@ static void _vm_handle_line(const String& s) {
         // Update the existing target variable your sketch already uses:
         sel_pressure = p_int;
         _vm_pcActive = true;           // PC is actively driving now
+        _vm_lastSetMs = millis();
         _vm_send_ack(p_int);
       }
     }
@@ -304,9 +306,7 @@ void loop() {
   // === VasoTracker: parse incoming PC commands (non-blocking) ===
   while (Serial.available()) {
     char c = (char)Serial.read();
-    if (c == '
-' || c == '
-') {
+    if (c == '\n' || c == '\r') {
       if (_vm_line.length() > 0) {
         _vm_handle_line(_vm_line);
         _vm_line = "";
@@ -316,6 +316,13 @@ void loop() {
     }
   }
   // === End parser ===
+  // Front-panel takeover if PC inactive for > 1500 ms
+  if (_vm_pcActive) {
+    unsigned long now_ms = millis();
+    if (now_ms - _vm_lastSetMs > 1500) {
+      _vm_pcActive = false;
+    }
+  }
 
   currentMillis = millis();
   if(moto == false) {
@@ -776,8 +783,8 @@ void lineFilling() {
   while (digitalRead(enSW)) {
     stepper.setStepFracSpeed(8, stepsPerSec);
     fillFast();
-    sel_pressure = encoderPos;
-    currentMillis = millis();
+    if (!_vm_pcActive) { sel_pressure = encoderPos; }
+currentMillis = millis();
     if (currentMillis - previousMillis >= timeDelay) {
       averagingPressure(numSamples);
       sprintf(selected, " %d ", sel_pressure);
@@ -1439,8 +1446,8 @@ void triangle() {
 void isRunningMoto() {
   recvWithStartEndMarkers();
   showNewData();
-  sel_pressure = encoderPos;
-  currentMillis = millis() - startMillis;
+  if (!_vm_pcActive) { sel_pressure = encoderPos; }
+currentMillis = millis() - startMillis;
   pressureControl(acceleration);
   if (currentMillis - previousMillis >= timeDelay) {
     currentTime = (currentMillis / 1000.00);
@@ -1536,8 +1543,8 @@ void isStoppingMoto() {
 void isPausedSim() {
   recvWithStartEndMarkers();
   showNewData();
-  sel_pressure = encoderPos;
-  currentMillis = millis() - startMillis;
+  if (!_vm_pcActive) { sel_pressure = encoderPos; }
+currentMillis = millis() - startMillis;
   pressureControl(acceleration);
   if (currentMillis - previousMillis >= timeDelay) {
     // currentTime = (currentMillis / 1000.00);
