@@ -70,7 +70,7 @@ from concurrent.futures import Future, ProcessPoolExecutor
 import csv
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from enum import IntEnum, auto
+from enum import Enum, IntEnum, auto
 from functools import partial
 import math
 from math import hypot
@@ -81,7 +81,7 @@ import sys
 import threading
 import time
 import traceback
-from typing import Callable, Dict, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Type
 import webbrowser
 # Suppress pygame welcome message
 sys.stdout = open(os.devnull, 'w')
@@ -192,6 +192,190 @@ gui_json_path = get_resource_path("VasoTrackerblue.json")
 
 # TODOs and Future Improvements
 # TODO:
+
+
+def _values_close(a, b, tol: Optional[float]) -> bool:
+    """Return True if ``a`` and ``b`` are within ``tol`` (or exactly equal when ``tol`` is None)."""
+    if tol is None:
+        return a == b
+    try:
+        fa = float(a)
+        fb = float(b)
+    except (TypeError, ValueError):
+        return a == b
+    if math.isnan(fa) or math.isnan(fb):
+        return math.isnan(fa) and math.isnan(fb)
+    return abs(fa - fb) <= tol
+
+
+class SmartVarDecision(Enum):
+    SKIP = auto()
+    EMIT = auto()
+    DEFER = auto()
+
+
+class SmartVarLimiter:
+    """Throttle Tk variable updates so we do not flood the event loop."""
+
+    __slots__ = ("_last_value", "_next_allowed", "_pending_value")
+
+    def __init__(self) -> None:
+        self._last_value = None
+        self._next_allowed = 0.0
+        self._pending_value = None
+
+    def evaluate(self, value, *, tol: Optional[float], min_interval: float, now: float) -> SmartVarDecision:
+        last = self._last_value
+        if last is None:
+            self._last_value = value
+            self._next_allowed = now + min_interval
+            self._pending_value = None
+            return SmartVarDecision.EMIT
+
+        unchanged = _values_close(value, last, tol)
+        if unchanged:
+            self._pending_value = None
+            if now >= self._next_allowed:
+                self._next_allowed = now + min_interval
+            return SmartVarDecision.SKIP
+
+        if now >= self._next_allowed:
+            self._pending_value = None
+            self._last_value = value
+            self._next_allowed = now + min_interval
+            return SmartVarDecision.EMIT
+
+        self._pending_value = value
+        return SmartVarDecision.DEFER
+
+    def flush(self, *, min_interval: float, now: float):
+        if self._pending_value is None:
+            return None
+        value = self._pending_value
+        self._pending_value = None
+        self._last_value = value
+        self._next_allowed = now + min_interval
+        return value
+
+    @property
+    def next_allowed(self) -> float:
+        return self._next_allowed
+
+
+class UiThrottle:
+    """Adapt GUI refresh cadence while menus are open to keep them responsive."""
+
+    def __init__(self, *, fast_ms: int = 20, slow_ms: int = 120, quiet_after: float = 0.25):
+        self.fast_ms = max(1, int(fast_ms))
+        self.slow_ms = max(self.fast_ms, int(slow_ms))
+        self.quiet_after = quiet_after
+        self.menu_mode = False
+        self._last_menu_event = 0.0
+
+    def enter_menu_mode(self) -> None:
+        self.menu_mode = True
+        self._last_menu_event = time.perf_counter()
+
+    def note_menu_activity(self) -> None:
+        self._last_menu_event = time.perf_counter()
+
+    def maybe_leave_menu_mode(self) -> None:
+        if not self.menu_mode:
+            return
+        if (time.perf_counter() - self._last_menu_event) >= self.quiet_after:
+            self.menu_mode = False
+
+    def current_period(self) -> int:
+        return self.slow_ms if self.menu_mode else self.fast_ms
+
+    def fast_period(self) -> int:
+        return self.fast_ms
+
+    def is_slowed(self) -> bool:
+        return self.menu_mode
+
+
+def wire_menu_throttle(root: tk.Misc, menubar: tk.Menu, throttle: UiThrottle) -> None:
+    """Slow down background refresh while native menus are posted."""
+
+    def _on_post():
+        throttle.enter_menu_mode()
+
+    def _on_select(_event):
+        throttle.note_menu_activity()
+
+    root.bind_all("<<MenuSelect>>", _on_select, add="+")
+    try:
+        last_index = menubar.index("end")
+    except tk.TclError:
+        last_index = None
+    if last_index is None:
+        return
+    for idx in range(last_index + 1):
+        try:
+            submenu_name = menubar.entrycget(idx, "menu")
+        except tk.TclError:
+            continue
+        if not submenu_name:
+            continue
+        try:
+            submenu = menubar.nametowidget(submenu_name)
+        except KeyError:
+            continue
+        submenu.configure(postcommand=_on_post)
+
+
+class UiHeartbeat:
+    """Single `.after` loop that coalesces lightweight UI tasks."""
+
+    def __init__(self, root: tk.Misc, throttle: UiThrottle, tasks: Iterable[Callable[[], Optional[bool]]]):
+        self._root = root
+        self._throttle = throttle
+        self._tasks = list(tasks)
+        self._job = None
+        self._fast_override_ms = max(5, self._throttle.fast_period() // 2)
+
+    def add_task(self, task: Callable[[], Optional[bool]]) -> None:
+        self._tasks.append(task)
+
+    def start(self) -> None:
+        if self._job is None:
+            self._schedule(self._throttle.current_period())
+
+    def stop(self) -> None:
+        if self._job is not None:
+            try:
+                self._root.after_cancel(self._job)
+            except Exception:
+                pass
+            self._job = None
+
+    def request_fast_tick(self) -> None:
+        if self._job is None:
+            return
+        self._root.after_cancel(self._job)
+        self._schedule(self._fast_override_ms)
+
+    def _schedule(self, delay_ms: int) -> None:
+        self._job = self._root.after(max(1, int(delay_ms)), self._run_once)
+
+    def _run_once(self) -> None:
+        self._job = None
+        request_fast = False
+        for task in self._tasks:
+            try:
+                result = task()
+            except Exception:
+                traceback.print_exc()
+                continue
+            if result:
+                request_fast = True
+        self._throttle.maybe_leave_menu_mode()
+        if request_fast and not self._throttle.is_slowed():
+            delay = min(self._throttle.current_period(), self._fast_override_ms)
+        else:
+            delay = self._throttle.current_period()
+        self._schedule(delay)
 
 
 @dataclass
@@ -855,10 +1039,9 @@ class FutureAndCallbackFlag:
 
 
 class Model:
-    def __init__(self, mmc: CMMCorePlus, set_timeout):
+    def __init__(self, mmc: CMMCorePlus):
         self.pressure_controller = None
         self.state = VtState()
-        self.set_timeout = set_timeout
         self.run_acq_thread = True
         self.acquiring = False
         self.file_analysed = False
@@ -885,6 +1068,11 @@ class Model:
         self.recorded_csv_writer = None
         self.recorded_csv_path = None
         self.trace_fieldnames = None
+        self._smart_var_limiters: Dict[str, SmartVarLimiter] = {}
+        self._ui_scheduler: Optional[Callable[[int, Callable[[], None]], Any]] = None
+        self._ui_scheduler_cancel: Optional[Callable[[Any], None]] = None
+        self._deferred_jobs: Dict[str, Any] = {}
+        self._pending_updates: Dict[str, Tuple[Any, float]] = {}
 
 
         try:
@@ -1037,6 +1225,83 @@ class Model:
         else:
             self.executor = ProcessPoolExecutor(max_workers=num_threads)
         self.futures_to_resolve = deque()
+
+    def _smart_var_set(
+        self,
+        key: str,
+        var,
+        value,
+        *,
+        tol: Optional[float],
+        min_interval: float,
+        now: Optional[float] = None,
+    ) -> bool:
+        """Throttle repetitive Tk variable updates."""
+        limiter = self._smart_var_limiters.get(key)
+        if limiter is None:
+            limiter = SmartVarLimiter()
+            self._smart_var_limiters[key] = limiter
+        if now is None:
+            now = time.perf_counter()
+        decision = limiter.evaluate(value, tol=tol, min_interval=min_interval, now=now)
+        if decision is SmartVarDecision.EMIT:
+            existing_job = self._deferred_jobs.pop(key, None)
+            if existing_job is not None and self._ui_scheduler_cancel is not None:
+                try:
+                    self._ui_scheduler_cancel(existing_job)
+                except Exception:
+                    pass
+            self._pending_updates.pop(key, None)
+            safe_var_set(var, value)
+            return True
+        if decision is SmartVarDecision.SKIP:
+            existing_job = self._deferred_jobs.pop(key, None)
+            if existing_job is not None and self._ui_scheduler_cancel is not None:
+                try:
+                    self._ui_scheduler_cancel(existing_job)
+                except Exception:
+                    pass
+            self._pending_updates.pop(key, None)
+            return False
+        # Defer: queue update after quiet period if possible
+        if self._ui_scheduler is None:
+            flushed = limiter.flush(min_interval=min_interval, now=now)
+            if flushed is not None:
+                safe_var_set(var, flushed)
+                return True
+            return False
+        delay_ms = max(1, int(max(0.0, limiter.next_allowed - now) * 1000))
+        existing_job = self._deferred_jobs.get(key)
+        if existing_job is not None and self._ui_scheduler_cancel is not None:
+            try:
+                self._ui_scheduler_cancel(existing_job)
+            except Exception:
+                pass
+        self._pending_updates[key] = (var, min_interval)
+        job = self._ui_scheduler(delay_ms, partial(self._flush_smart_var, key))
+        self._deferred_jobs[key] = job
+        return True
+
+    def set_ui_scheduler(
+        self,
+        after_call: Callable[[int, Callable[[], None]], Any],
+        cancel_call: Callable[[Any], None],
+    ) -> None:
+        self._ui_scheduler = after_call
+        self._ui_scheduler_cancel = cancel_call
+
+    def _flush_smart_var(self, key: str) -> None:
+        self._deferred_jobs.pop(key, None)
+        pending = self._pending_updates.pop(key, None)
+        limiter = self._smart_var_limiters.get(key)
+        if pending is None or limiter is None:
+            return
+        var, min_interval = pending
+        now = time.perf_counter()
+        value = limiter.flush(min_interval=min_interval, now=now)
+        if value is None:
+            return
+        safe_var_set(var, value)
 
     def _reset_save_gate(self, t_now: float, interval: float) -> None:
         """Prime the save gate so it fires at most once per recording interval."""
@@ -1270,14 +1535,14 @@ class Model:
 
         tb.acq.scale.trace_add("write", update_scale)
 
-    def process_images(self):
+    def process_images(self) -> bool:
         got_im = False
         while not self.queue.empty():
             im = self.queue.get(block=False)
             got_im = True
 
         if not got_im:
-            return
+            return False
 
         tb = self.state.toolbar
         current_time = time.perf_counter()
@@ -1328,6 +1593,7 @@ class Model:
 
             
         self.frame_count += 1
+        return got_im
 
     def resolve_next_pending_future(self):
         def resolve_future(f: Future):
@@ -1587,6 +1853,7 @@ class Model:
             graph.markers.y = marker_ordinates
 
             if have_autocaliper or have_multi_roi:
+                tick_now_lines = time.perf_counter()
                 filter_diams=tb.analysis.filter.get()
                 def compute_masked_diams(diam_list, good_list):
                     masked_diams = []
@@ -1650,8 +1917,22 @@ class Model:
                     measure.inner_diam_roi[i].append(line_id_value)
 
                     # This is used to update the variable in the entry box the show/ hides traces.
-                    tb.plotting.outer_diam_values[i].set(line_od_value)
-                    tb.plotting.inner_diam_values[i].set(line_id_value)
+                    self._smart_var_set(
+                        f"plot_od_{i}",
+                        tb.plotting.outer_diam_values[i],
+                        line_od_value,
+                        tol=0.1,
+                        min_interval=0.2,
+                        now=tick_now_lines,
+                    )
+                    self._smart_var_set(
+                        f"plot_id_{i}",
+                        tb.plotting.inner_diam_values[i],
+                        line_id_value,
+                        tol=0.1,
+                        min_interval=0.2,
+                        now=tick_now_lines,
+                    )
                     
 
 
@@ -1676,18 +1957,65 @@ class Model:
                 delta = max(current_time - self.prev_update, 1e-9)
                 acq_rate = 1.0 / delta
             self.prev_update = current_time
-            tb.acq.acq_rate.set(np.round(acq_rate, 2))
-            tb.data_acq.time.set(np.round(self.time_elapsed, 1))
+            tick_now_metrics = time.perf_counter()
+            acq_rate_value = float(np.round(acq_rate, 2))
+            self._smart_var_set(
+                "acq_rate",
+                tb.acq.acq_rate,
+                acq_rate_value,
+                tol=0.05,
+                min_interval=0.12,
+                now=tick_now_metrics,
+            )
+            elapsed_value = float(np.round(self.time_elapsed, 1))
+            self._smart_var_set(
+                "time_elapsed",
+                tb.data_acq.time,
+                elapsed_value,
+                tol=0.05,
+                min_interval=0.12,
+                now=tick_now_metrics,
+            )
             formatted_time = time.strftime(
                 "%H:%M:%S", time.gmtime(max(0.0, self.time_elapsed))
             )
-            tb.data_acq.time_string.set(formatted_time)
-            tb.data_acq.outer_diam.set(np.round(diams.avg_outer_diam, 1))
-            tb.data_acq.inner_diam.set(np.round(diams.avg_inner_diam, 1))
+            self._smart_var_set(
+                "time_string",
+                tb.data_acq.time_string,
+                formatted_time,
+                tol=None,
+                min_interval=0.5,
+                now=tick_now_metrics,
+            )
+            outer_avg = float(np.round(diams.avg_outer_diam, 1))
+            inner_avg = float(np.round(diams.avg_inner_diam, 1))
+            self._smart_var_set(
+                "avg_outer_diam",
+                tb.data_acq.outer_diam,
+                outer_avg,
+                tol=0.05,
+                min_interval=0.12,
+                now=tick_now_metrics,
+            )
+            self._smart_var_set(
+                "avg_inner_diam",
+                tb.data_acq.inner_diam,
+                inner_avg,
+                tol=0.05,
+                min_interval=0.12,
+                now=tick_now_metrics,
+            )
             ref_diam = self.state.table.ref_diam.get()
             if not np.isnan(ref_diam) and ref_diam != 0.0:
                 outer_percentage = np.round((diams.avg_outer_diam / ref_diam) * 100, 2)
-                tb.data_acq.diam_percent.set(outer_percentage)
+                self._smart_var_set(
+                    "outer_percentage",
+                    tb.data_acq.diam_percent,
+                    float(outer_percentage),
+                    tol=0.1,
+                    min_interval=0.2,
+                    now=tick_now_metrics,
+                )
 
 
 
@@ -1750,39 +2078,34 @@ class Model:
             description = metadata_json
             self.tiff_writer2.write(image, description=description)
 
-    def process_updates(self):
-        tb = self.state.toolbar
+    def process_updates(self) -> bool:
+        if not self.run_acq_thread:
+            return False
+
+        did_work = False
         try:
-            self.process_images()
-        except:
+            if self.process_images():
+                did_work = True
+        except Exception:
             traceback.print_exc()
 
-        # need to update the timer here
         if (
             self.pressure_controller is not None
             and self.state.toolbar.pressure_protocol.pressure_protocol_flag.get() == 1
         ):
-            #update the timer here
-            # new if based on timer to set pressure
-             #Timenow + interval = next pressure
             try:
                 self.pressure_controller.update_intvl()
-            except:
+            except Exception:
                 traceback.print_exc()
 
-        else:
-            pass
-
-        if getattr(self, "pressure_controller", None):
+        controller = getattr(self, "pressure_controller", None)
+        if controller is not None:
             try:
-                self.pressure_controller.poll_latest()
+                controller.poll_latest()
             except Exception:
                 pass
 
-        if self.run_acq_thread:
-            # NOTE(cmo): This is only set False when we're exiting, at which
-            # point stop handling future events
-            self.set_timeout(10, self.process_updates)
+        return did_work
 
     ##### WORKING HERE
 
@@ -5162,10 +5485,15 @@ class CameraController:
 
 class Controller:
     def __init__(self, root, mmc):
-        self.model = Model(mmc, set_timeout=root.after)
+        self.model = Model(mmc)
+        self.model.set_ui_scheduler(root.after, root.after_cancel)
         shutdown_callbacks = []
         shutdown_callbacks.append(self.model.get_shutdown_callback())
         self.view = View(root, self.model.state, self.set_camera, shutdown_callbacks=shutdown_callbacks)
+        self.ui_throttle = UiThrottle()
+        wire_menu_throttle(root, self.view.menus.menu_bar, self.ui_throttle)
+        self.heartbeat = UiHeartbeat(root, self.ui_throttle, (self.model.process_updates,))
+        self.view.shutdown_callbacks.append(self.heartbeat.stop)
         self.camera_controller = CameraController(self.model, self.view)
 
         # Instantiate the PressureController
@@ -5191,13 +5519,14 @@ class Controller:
         #output_path = self.get_output_filename()
         #self.model.setup_output_files(output_path=output_path)
 
+        self.model.process_updates()
+        self.heartbeat.start()
+
         if self.model.configure.registration.register_flag == 0:
             # Present the registration splash modally so the main window isn’t left unresponsive.
             show_registration_screen(self)
         else:
             root.deiconify()
-
-        self.model.process_updates()
 
     def get_output_filename(self):
         # Create a folder with the current date
