@@ -79,7 +79,7 @@ class Writer:
         self._csv_tmp_path = self.folder / f"{csv_name}.tmp"
         self._csv_file = open(self._csv_tmp_path, mode="w", newline="", encoding="utf-8")
         self._csv_writer = csv.writer(self._csv_file)
-        self._csv_writer.writerow(["t", "frame", "p1", "p2", "Set Pressure (mmHg)", "note"])
+        self._csv_writer.writerow(["Time (s)", "Device Time (ms)", "Pressure 1 (mmHg)", "Set Pressure (mmHg)", "Note"])
         self._csv_file.flush()
 
         self._stop_event.clear()
@@ -138,30 +138,29 @@ class Writer:
 
     def push_telemetry(
         self,
-        t: float,
-        frame_no: Optional[int],
-        p1: Optional[float],
-        p2: Optional[float],
-        setpoint: Optional[float],
+        time_s: float,
+        device_time_ms: Optional[float],
+        pressure_mmHg: Optional[float],
+        setpoint_mmHg: Optional[float],
         note: str = "",
     ) -> None:
         """Queue a telemetry row for writing."""
         if (
             note
             and note.startswith("step_")
-            and setpoint is not None
+            and setpoint_mmHg is not None
             and self._last_written_setpoint is not None
-            and abs(setpoint - self._last_written_setpoint) < 1e-3
+            and abs(setpoint_mmHg - self._last_written_setpoint) < 1e-3
             and not self._stale_setpoint_warned
         ):
             logging.warning(
                 "Setpoint marker %s arrived but CSV value did not change (%.2f mmHg).",
                 note,
-                setpoint,
+                setpoint_mmHg,
             )
             self._stale_setpoint_warned = True
 
-        payload = [t, frame_no, p1, p2, setpoint, note]
+        payload = [time_s, device_time_ms, pressure_mmHg, setpoint_mmHg, note]
         try:
             self._telemetry.put_nowait(payload)
         except queue.Full:
@@ -173,13 +172,13 @@ class Writer:
                 self._telemetry.put_nowait(payload)
             except queue.Full:
                 pass
-        if setpoint is not None:
+        if setpoint_mmHg is not None:
             if (
                 self._last_written_setpoint is None
-                or abs(setpoint - self._last_written_setpoint) >= 1e-3
+                or abs(setpoint_mmHg - self._last_written_setpoint) >= 1e-3
             ):
                 self._stale_setpoint_warned = False
-            self._last_written_setpoint = setpoint
+            self._last_written_setpoint = setpoint_mmHg
 
     def write_metadata(self, metadata: dict, filename: str = "metadata.json") -> None:
         """

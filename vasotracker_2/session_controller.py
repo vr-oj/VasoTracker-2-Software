@@ -358,9 +358,8 @@ class SessionController:
             if reading:
                 writer.push_telemetry(
                     reading.t,
-                    None,
+                    reading.device_time_ms,
                     reading.p1,
-                    reading.p2,
                     reading.setpoint if reading.setpoint is not None else self.current_target_mmHg,
                 )
                 telem_count += 1
@@ -421,9 +420,8 @@ class SessionController:
             if reading:
                 self.writer.push_telemetry(
                     reading.t,
-                    None,
+                    reading.device_time_ms,
                     reading.p1,
-                    reading.p2,
                     reading.setpoint if reading.setpoint is not None else self.current_target_mmHg,
                 )
             self._maybe_query_device_setpoint(time.time())
@@ -431,7 +429,6 @@ class SessionController:
     def _on_step_start(self, index: int, step: Step) -> None:
         self.writer.push_telemetry(
             time.perf_counter(),
-            None,
             None,
             None,
             self.current_target_mmHg,

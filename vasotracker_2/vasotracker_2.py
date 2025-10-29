@@ -3398,6 +3398,7 @@ class PressureControlPane(ToolbarPane):
         self._pending_gui_event = False
         self._last_gui_event_ts = 0.0
         self._listener_removed = False
+        self._last_device_value: Optional[float] = None
 
         self._recent_events = deque(maxlen=5)
         self._debug_visible = False
@@ -3438,6 +3439,19 @@ class PressureControlPane(ToolbarPane):
 
         ctk.CTkLabel(self, text="Manual control:", font=(default_font, default_font_size)).grid(row=3, column=0, columnspan=4, sticky=tk.W)
 
+        self._suppress_manual_slider = False
+        initial_setpoint = safe_var_float(sv.set_pressure, default=0.0)
+        self.manual_slider = ctk.CTkSlider(
+            self,
+            from_=0,
+            to=200,
+            number_of_steps=2000,
+            width=260,
+            command=self._on_manual_slider,
+        )
+        self.manual_slider.grid(row=4, column=0, columnspan=4, padx=padx, pady=(4, 6), sticky="ew")
+        self.manual_slider.set(initial_setpoint)
+
         # Recessed Entry
         self.outer_diam_entry = ctk.CTkEntry(
             self,
@@ -3450,22 +3464,22 @@ class PressureControlPane(ToolbarPane):
             placeholder_text_color=entry_placeholder_color,
             state=tk.DISABLED,
         )
-        self.outer_diam_entry.grid(row=4, column=1, columnspan=2)  # Span two columns
+        self.outer_diam_entry.grid(row=5, column=1, columnspan=2)  # Span two columns
 
         self.minus_img = self.resize_img(os.path.join(images_folder, 'Subtract Button Black.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
         self.minus_button = ctk.CTkButton(self, image=self.minus_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH)
-        self.minus_button.grid(row=4, column=0, padx=padx, pady=pady)
+        self.minus_button.grid(row=5, column=0, padx=padx, pady=pady)
         self.minus_button.image = self.minus_img  # Keep a reference
 
         self.add_img = self.resize_img(os.path.join(images_folder, 'Add Button Black.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
         self.add_button = ctk.CTkButton(self, image=self.add_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH,)
-        self.add_button.grid(row=4, column=3, padx=(5,5), pady=pady)
+        self.add_button.grid(row=5, column=3, padx=(5,5), pady=pady)
         self.add_button.image = self.add_img  # Keep a reference
 
-        ctk.CTkLabel(self, text="Increment change:", font=(default_font, default_font_size)).grid(row=5, column=0, columnspan=4, sticky=tk.W)
+        ctk.CTkLabel(self, text="Increment change:", font=(default_font, default_font_size)).grid(row=6, column=0, columnspan=4, sticky=tk.W)
 
         self.pressure_increment_entry = ctk.CTkSlider(self, from_=1, to=20, variable=sv.pressure_increment, width=120)
-        self.pressure_increment_entry.grid(row=6, column=0, padx=padx, columnspan=2)  # Span two columns
+        self.pressure_increment_entry.grid(row=7, column=0, padx=padx, columnspan=2)  # Span two columns
 
         self.slider_value_entry = ctk.CTkEntry(
             self,
@@ -3478,7 +3492,7 @@ class PressureControlPane(ToolbarPane):
             placeholder_text_color=entry_placeholder_color,
             state=tk.DISABLED,
         )
-        self.slider_value_entry.grid(row=6, column=2, padx=padx, columnspan=2, sticky="w")  # Span two columns
+        self.slider_value_entry.grid(row=7, column=2, padx=padx, columnspan=2, sticky="w")  # Span two columns
 
         self.model_vars.app.auto_pressure.trace_add(
             "write", lambda *args: self.start_protocol_button_state_callback()
@@ -3553,6 +3567,8 @@ class PressureControlPane(ToolbarPane):
         self.add_button.configure(state=button_state)
         self.minus_button.configure(state=button_state)
         self.pressure_increment_entry.configure(state=slider_state)
+        if hasattr(self, "manual_slider"):
+            self.manual_slider.configure(state=slider_state)
         self.outer_diam_entry.configure(state=entry_state, fg_color=entry_bg)
         self.slider_value_entry.configure(state=entry_state, fg_color=entry_bg)
 
@@ -3574,27 +3590,44 @@ class PressureControlPane(ToolbarPane):
     def _handle_setpoint_event(self, value: float, source: str) -> None:
         def update() -> None:
             protocol = self.model_vars.toolbar.pressure_protocol
-            protocol.device_set_pressure.set(f"{float(value):.1f}")
-            protocol.device_set_source.set(source)
-            self._device_display_var.set(f"Device set pressure: {float(value):.1f} mmHg")
-
             now = time.time()
             lower_source = (source or "").lower()
-            if lower_source in {"command", "gui", "pressurecontroller", "script"}:
+            command_sources = {"command", "gui", "pressurecontroller", "script"}
+            ack_sources = {"echo", "device", "device_echo"}
+
+            if lower_source in command_sources:
+                protocol.device_set_source.set(source)
                 self._pending_gui_event = True
                 self._last_gui_event_ts = now
-                self._apply_device_state(self._colour_neutral)
-            elif lower_source == "echo":
-                if self._pending_gui_event and (now - self._last_gui_event_ts) <= 0.5:
+                pending_text = "Device set pressure: Pending..."
+                if self._last_device_value is not None:
+                    pending_text = f"Device set pressure: Pending... (was {self._last_device_value:.1f} mmHg)"
+                self._device_display_var.set(pending_text)
+                self._apply_device_state(self._colour_amber)
+            elif lower_source in ack_sources:
+                numeric = float(value)
+                self._last_device_value = numeric
+                formatted = f"{numeric:.1f}"
+                protocol.device_set_pressure.set(formatted)
+                protocol.device_set_source.set(source)
+                self._device_display_var.set(f"Device set pressure: {formatted} mmHg")
+                self._sync_manual_slider(numeric)
+                was_pending = self._pending_gui_event
+                if was_pending and (now - self._last_gui_event_ts) <= 0.5:
                     self._apply_device_state(self._colour_green)
                 else:
                     self._apply_device_state(self._colour_neutral)
                 self._pending_gui_event = False
-            elif lower_source in {"device", "device_echo"}:
-                self._pending_gui_event = False
-                self._apply_device_state(self._colour_amber)
             else:
+                numeric = float(value)
+                self._last_device_value = numeric
+                formatted = f"{numeric:.1f}"
+                protocol.device_set_pressure.set(formatted)
+                protocol.device_set_source.set(source)
+                self._device_display_var.set(f"Device set pressure: {formatted} mmHg")
+                self._sync_manual_slider(numeric)
                 self._apply_device_state(self._colour_neutral)
+                self._pending_gui_event = False
 
             self._recent_events.append((now, lower_source, float(value)))
             self._refresh_debug_overlay()
@@ -3606,6 +3639,44 @@ class PressureControlPane(ToolbarPane):
             self.device_set_label.configure(text_color=colour)
         except tk.TclError:
             pass
+
+    def _sync_manual_slider(self, value: float) -> None:
+        if not hasattr(self, "manual_slider"):
+            return
+        try:
+            self._suppress_manual_slider = True
+            self.manual_slider.set(value)
+        except Exception:
+            pass
+        finally:
+            self._suppress_manual_slider = False
+
+    def _issue_manual_setpoint(self, value: float, *, update_table: bool) -> None:
+        controller = getattr(self.model_vars, "pressure_controller", None)
+        if controller is None:
+            return
+        numeric = max(0.0, min(200.0, float(value)))
+        protocol = self.model_vars.toolbar.pressure_protocol
+        safe_var_set(protocol.set_pressure, f"{numeric:.1f}")
+        self._sync_manual_slider(numeric)
+        try:
+            controller.adjust_pressure(numeric, update_table=update_table)
+        except Exception as exc:
+            print("Failed to adjust pressure:", exc)
+
+    def _on_manual_slider(self, raw_value: float) -> None:
+        if self._suppress_manual_slider:
+            return
+        numeric = max(0.0, min(200.0, float(raw_value)))
+        protocol = self.model_vars.toolbar.pressure_protocol
+        safe_var_set(protocol.set_pressure, f"{numeric:.1f}")
+        controller = getattr(self.model_vars, "pressure_controller", None)
+        if controller is None:
+            return
+        try:
+            controller.adjust_pressure(numeric, update_table=False)
+        except Exception as exc:
+            print("Failed to adjust pressure:", exc)
 
     def _toggle_debug_overlay(self) -> None:
         self._debug_visible = not self._debug_visible
@@ -5471,7 +5542,9 @@ class Controller:
         new_pressure = current_pressure - increment
         if new_pressure < 0:
             new_pressure = 0
-        safe_var_set(self.model.state.toolbar.pressure_protocol.set_pressure, f"{new_pressure:.2f}")
+        pane = self.view.toolbar.pressure_control_settings
+        if pane is not None:
+            pane._issue_manual_setpoint(new_pressure, update_table=True)
 
     def increase_pressure(self):
         increment = safe_var_float(
@@ -5485,7 +5558,9 @@ class Controller:
         new_pressure = current_pressure + increment
         if new_pressure > 200:
             new_pressure = 200
-        safe_var_set(self.model.state.toolbar.pressure_protocol.set_pressure, f"{new_pressure:.2f}")
+        pane = self.view.toolbar.pressure_control_settings
+        if pane is not None:
+            pane._issue_manual_setpoint(new_pressure, update_table=True)
 
     def start_acq(self):
         current_state = self.model.state.app.acquiring.get()
@@ -5570,8 +5645,9 @@ class Controller:
         new_pressure_value = safe_var_float(
             self.model.state.toolbar.pressure_protocol.set_pressure, default=0.0
         )
-        if self.pressure_controller is not None:
-            self.pressure_controller.adjust_pressure(new_pressure_value, update_table=True)
+        pane = self.view.toolbar.pressure_control_settings
+        if pane is not None:
+            pane._issue_manual_setpoint(new_pressure_value, update_table=True)
 
     def open_pressure_settings(self):
         controller = self.pressure_controller

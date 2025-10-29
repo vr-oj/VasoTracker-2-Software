@@ -119,7 +119,7 @@ class DummyWriter:
         telemetry_queue_size: int = 2000,
     ) -> None:
         self.folder = folder
-        self.telemetry_rows: list[list[Optional[float]]] = []
+        self.telemetry_rows: list[list[object]] = []
 
     def start(self, *args: Any, **kwargs: Any) -> None:
         return None
@@ -129,14 +129,13 @@ class DummyWriter:
 
     def push_telemetry(
         self,
-        t: float,
-        frame_no: Optional[int],
-        p1: Optional[float],
-        p2: Optional[float],
-        setpoint: Optional[float],
+        time_s: float,
+        device_time_ms: Optional[float],
+        pressure_mmHg: Optional[float],
+        setpoint_mmHg: Optional[float],
         note: str = "",
     ) -> None:
-        self.telemetry_rows.append([t, frame_no, p1, p2, setpoint, note])
+        self.telemetry_rows.append([time_s, device_time_ms, pressure_mmHg, setpoint_mmHg, note])
 
     def close(self) -> None:
         return None
@@ -247,7 +246,7 @@ def test_setpoint_logged_each_step(tmp_path, monkeypatch) -> None:
         setpoint_bus.clear_setpoint_handler(session._ingest_external_setpoint)  # type: ignore[attr-defined]
         setpoint_bus.clear_setpoint_query(session._handle_refresh_request)  # type: ignore[attr-defined]
 
-    recorded = [row[4] for row in writer.telemetry_rows]
+    recorded = [row[3] for row in writer.telemetry_rows]
     assert recorded[: len(commanded)] == commanded
     assert recorded[-1] == pytest.approx(65.0, abs=1e-6)
     assert len(set(recorded)) == len(commanded) + 1

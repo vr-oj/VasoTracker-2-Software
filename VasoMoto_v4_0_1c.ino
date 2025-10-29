@@ -15,8 +15,6 @@
 #include "FreeSansBold9pt7b.h"
 #include <Adafruit_ST7735.h>  // Hardware-specific library
 #include "stepper.h"
-#include <math.h>
-#include <string.h>
 
 /*ADC Setup*/
   ADS1115 ads;
@@ -164,20 +162,6 @@
   char receivedChars[numChars];
   bool newData = false;
 
-// --- Set Pressure echo helpers/state ---
-float last_sp_sent = NAN;            // track last broadcast set pressure
-unsigned long last_sp_broadcast = 0; // timestamp of last broadcast
-int last_sp_bucket = -9999;          // track last bucket broadcast
-const int SP_BUCKET = 20;            // bucket step in mmHg
-
-inline void broadcastSP(float v) {
-  Serial.print("<SP:");
-  Serial.print(v, 1);
-  Serial.println(">");
-  last_sp_sent = v;
-  last_sp_broadcast = millis();
-}
-
 /*Miscellaneous global variables*/
   unsigned long previousMillis = 0;
   unsigned long prevmillis = 0;
@@ -221,7 +205,44 @@ inline void broadcastSP(float v) {
   char bufferPR[32];   //pulse rate string
   char debugging[50]; //for ease of reading serial output stuff
 
+/* === VasoTracker PC control additions === */
+// Clean, machine-readable channel for the app.
+// Host -> Device:  "SET P=<mmHg>"
+// Device -> Host:  "ACK SET P=<mmHg> T=<ms>"
+// Telemetry @ 25 Hz: "DATA T=<ms> P=<avgPressure> P_SET=<sel_pressure>"
+static const uint16_t VM_TELEMETRY_HZ = 25;      // DATA lines per second
+static unsigned long _vm_nextDataMs = 0;
+static bool _vm_pcActive = false;                // becomes true when a PC SET is received
+static String _vm_line;                          // tiny line buffer
+
+static void _vm_send_ack(int p_int) {
+  Serial.print(F("ACK SET P=")); Serial.print(p_int);
+  Serial.print(F(" T="));        Serial.println(millis());
+}
+
+// Expect exactly: "SET P=80.0" (whitespace-insensitive on either side)
+static void _vm_handle_line(const String& s) {
+  if (s.startsWith("SET")) {
+    int idx = s.indexOf('P');
+    if (idx >= 0) {
+      int eq = s.indexOf('=', idx);
+      if (eq > 0) {
+        float p = s.substring(eq + 1).toFloat();
+        int p_int = (int)(p + 0.5f);
+        // Update the existing target variable your sketch already uses:
+        sel_pressure = p_int;
+        _vm_pcActive = true;           // PC is actively driving now
+        _vm_send_ack(p_int);
+      }
+    }
+  }
+}
+/* === End additions === */
+
 void setup() {
+  // Init VasoTracker telemetry scheduler
+  _vm_nextDataMs = millis();
+
   Serial.begin(115200);
   ads.begin();
   ads.setGain(GAIN_ONE);
@@ -280,6 +301,22 @@ initialize.write(startup);
 }
 
 void loop() {
+  // === VasoTracker: parse incoming PC commands (non-blocking) ===
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '
+' || c == '
+') {
+      if (_vm_line.length() > 0) {
+        _vm_handle_line(_vm_line);
+        _vm_line = "";
+      }
+    } else {
+      if (_vm_line.length() < 120) _vm_line += c;
+    }
+  }
+  // === End parser ===
+
   currentMillis = millis();
   if(moto == false) {
     if (runStateSim == 0) {
@@ -367,46 +404,10 @@ void recvWithStartEndMarkers() {
   }
 }
 
-void processCommand() {
-  if (strcmp(receivedChars, "?SP") == 0) {
-    float reportValue = isnan(last_sp_sent) ? (float)sel_pressure : last_sp_sent;
-    broadcastSP(reportValue);
-    newData = false;
-    return;
-  }
-
-  if (receivedChars[0] == 'S' && receivedChars[1] == ':' && receivedChars[2] != '\0') {
-    int v = atoi(receivedChars + 2);
-    encoderPos = v;
-    broadcastSP((float)encoderPos);
-    newData = false;
-    return;
-  }
-
-  bool numeric = true;
-  if (receivedChars[0] == '\0') {
-    numeric = false;
-  } else {
-    for (char *p = receivedChars; *p; ++p) {
-      if (*p < '0' || *p > '9') {
-        numeric = false;
-        break;
-      }
-    }
-  }
-  if (numeric) {
-    encoderPos = atoi(receivedChars);
-    broadcastSP((float)encoderPos);
-    newData = false;
-    return;
-  }
-
-  newData = false;
-}
-
 void showNewData() {
   if (newData == true) {
-    processCommand();
+    encoderPos = atoi(receivedChars);
+    newData = false;
   }
 }
 
@@ -1439,9 +1440,6 @@ void isRunningMoto() {
   recvWithStartEndMarkers();
   showNewData();
   sel_pressure = encoderPos;
-  if (isnan(last_sp_sent) || fabs((float)sel_pressure - last_sp_sent) >= 0.5f) {
-    broadcastSP((float)sel_pressure);
-  }
   currentMillis = millis() - startMillis;
   pressureControl(acceleration);
   if (currentMillis - previousMillis >= timeDelay) {
@@ -1461,9 +1459,6 @@ void isRunningMoto() {
     drawColorBar(coloring, 0, 84, 8, 5);
     previousMillis = currentMillis;
   }
-  if (millis() - last_sp_broadcast > 1000) {
-    broadcastSP((float)sel_pressure);
-  }
   while (digitalRead(enSW) == 0) {
     runStateMoto = 0;
     encoderPos = 0;
@@ -1476,12 +1471,6 @@ void isRunningSim() {
   showNewData();
   currentMillis = millis() - startMillis;
   triangle();
-  int bucketIndex = (sel_pressure + (SP_BUCKET / 2)) / SP_BUCKET;
-  int bucketValue = bucketIndex * SP_BUCKET;
-  if (bucketValue != last_sp_bucket || isnan(last_sp_sent)) {
-    last_sp_bucket = bucketValue;
-    broadcastSP((float)bucketValue);
-  }
   pressureRamp(acceleration);
   if (currentMillis - previousMillis >= timeDelay) {
     currentTime = (currentMillis / 1000.00);
@@ -1500,9 +1489,6 @@ void isRunningSim() {
     sprintf(RunningOutputSim, "<P1:%.2f;P2:%.2f>", avgPressure, avgPressure); //change 2nd one to 'avgTension' once VasoTracker can handle it
     Serial.println(RunningOutputSim);
     previousMillis = currentMillis;
-  }
-  if (millis() - last_sp_broadcast > 1000) {
-    broadcastSP((float)bucketValue);
   }
   while (digitalRead(enSW) == 0) {
     runStateSim = 0;
@@ -1551,9 +1537,6 @@ void isPausedSim() {
   recvWithStartEndMarkers();
   showNewData();
   sel_pressure = encoderPos;
-  if (isnan(last_sp_sent) || fabs((float)sel_pressure - last_sp_sent) >= 0.5f) {
-    broadcastSP((float)sel_pressure);
-  }
   currentMillis = millis() - startMillis;
   pressureControl(acceleration);
   if (currentMillis - previousMillis >= timeDelay) {
@@ -1571,9 +1554,6 @@ void isPausedSim() {
     sprintf(RunningOutputSim, "<P1:%.2f;P2:%.2f>", avgPressure, avgPressure); //change 2nd one to 'avgTension' once VasoTracker can handle it
     Serial.println(RunningOutputSim);
     previousMillis = currentMillis;
-  }
-  if (millis() - last_sp_broadcast > 1000) {
-    broadcastSP((float)sel_pressure);
   }
   while (digitalRead(enSW) == 0) {
       runStateSim = 1;
@@ -1633,4 +1613,16 @@ void isStoppingSim() {
       NVIC_SystemReset();
     }
   }
+
+  // === VasoTracker: telemetry for app/CSV ===
+  {
+    unsigned long _now = millis();
+    if (_now >= _vm_nextDataMs) {
+      _vm_nextDataMs += (1000UL / VM_TELEMETRY_HZ);
+      Serial.print(F("DATA T=")); Serial.print(_now);
+      Serial.print(F(" P="));     Serial.print(avgPressure, 2);   // your measured pressure variable
+      Serial.print(F(" P_SET=")); Serial.println(sel_pressure);   // your applied target
+    }
+  }
+  // === End telemetry ===
 }

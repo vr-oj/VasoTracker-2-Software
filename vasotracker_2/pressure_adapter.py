@@ -1,14 +1,18 @@
 """
 Pressure adapter for VasoTracker 2.
 
-This module encapsulates all serial-port handling for the pressure controller.
-It supports legacy `<NN>` framing and the newer CSV telemetry, automatically
-detecting the correct protocol during the preflight handshake.
+This module wraps the low-level `VasoMotorPort` helper and presents a small
+interface that the rest of the application (session controller, tests, etc.)
+expect: `connect`, `close`, `read`, `_set_target`, and `query_setpoint`.
+
+Telemetry is streamed asynchronously from the device.  Each `DATA` line is
+converted into a `PressureReading` containing host timestamp, device time,
+pressure, and applied setpoint.  `ACK` lines are used to surface setpoint
+echoes so higher layers can confirm when a command has been applied.
 """
 
 from __future__ import annotations
 
-import math
 import queue
 import re
 import threading
@@ -16,13 +20,20 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Iterable, List, Optional, Tuple
 
-import serial
-from serial.tools import list_ports
+try:
+    import serial  # type: ignore[import]
+    from serial.tools import list_ports  # type: ignore[import]
+except ImportError as exc:  # pragma: no cover - runtime dependency
+    raise ImportError(
+        "pyserial is required for Arduino communication. Install with `pip install pyserial`."
+    ) from exc
 
 try:  # Optional dependency; only used for busy-port diagnostics.
-    import psutil
+    import psutil  # type: ignore[import]
 except ImportError:  # pragma: no cover - psutil is optional
     psutil = None
+
+from .vasomotor_port import VasoMotorPort
 
 
 @dataclass
@@ -34,6 +45,7 @@ class PressureReading:
     setpoint: Optional[float]
     raw: str
     t: float  # monotonic timestamp
+    device_time_ms: Optional[float] = None
 
 
 class PressureAdapter:
@@ -45,20 +57,7 @@ class PressureAdapter:
     so consumers can poll without blocking the UI thread.
     """
 
-    DATA_REGEX = re.compile(
-        r"DATA\s+T=(\d+)\s+P=([-+\d\.NaN]+)\s+P_SET=([-+\d\.NaN]+)",
-        re.IGNORECASE,
-    )
-    LEGACY_REGEX = re.compile(
-        r"<\s*P1:(-?\d+\.?\d*)\s*[,;]\s*P2:(-?\d+\.?\d*)"
-        r"(?:\s*[,;]\s*SET:(-?\d+\.?\d*))?\s*>",
-        re.IGNORECASE,
-    )
-    CSV_REGEX = re.compile(
-        r"P1:(-?\d+\.?\d*)[,;]\s*P2:(-?\d+\.?\d*)"
-        r"(?:[,;]\s*SET:(-?\d+\.?\d*))?",
-        re.IGNORECASE,
-    )
+    ACK_RE = re.compile(r"^ACK\s+SET\s+P=([\d\.\-]+)\s+T=(\d+)")
 
     def __init__(
         self,
@@ -74,13 +73,17 @@ class PressureAdapter:
         self._queue: "queue.Queue[PressureReading]" = queue.Queue(maxsize=queue_size)
         self._reader_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._last_setpoint: Optional[float] = None
         self._lock = threading.RLock()
-        self.protocol: Optional[str] = None  # "legacy" or "csv"
-        self._serial: Optional[serial.Serial] = None
+        self._vm_port: Optional[VasoMotorPort] = None
         self._setpoint_callback = setpoint_callback
-        self._last_notified_setpoint: Optional[float] = None
+        self._last_callback_value: Optional[float] = None
+        self._last_command_value: Optional[float] = None
+        self._last_close_ts: float = 0.0
+        self.protocol: Optional[str] = None  # For compatibility with existing UI/tests.
 
+    # ------------------------------------------------------------------ #
+    # Public API                                                         #
+    # ------------------------------------------------------------------ #
     @staticmethod
     def list_serial_ports() -> List[Tuple[str, str]]:
         """
@@ -103,11 +106,14 @@ class PressureAdapter:
             ports.append((port_info.device, description or port_info.device))
         return ports
 
-    # Public API -----------------------------------------------------------------
     def connect(self) -> None:
-        """Connect to the pressure controller, auto-detecting the protocol."""
+        """Connect to the pressure controller, trying candidate ports as needed."""
         with self._lock:
             self.close()
+            now = time.monotonic()
+            if now - self._last_close_ts < 0.2:
+                time.sleep(0.2 - (now - self._last_close_ts))
+
             candidates = (
                 [self.port] if self.port else [device for device, _ in self.list_serial_ports()]
             )
@@ -116,18 +122,20 @@ class PressureAdapter:
 
             last_error: Optional[Exception] = None
             for device in candidates:
+                if not device:
+                    continue
                 try:
-                    self._serial = self._open_serial(device)
+                    self._vm_port = self._open_port(device)
                     self.port = device
-                    self._detect_protocol()
+                    self.protocol = "vasomotor"
                     self._start_reader()
                     return
-                except Exception as exc:  # noqa: BLE001 - we want to capture any failure
+                except Exception as exc:  # noqa: BLE001 - surface raw message
                     last_error = exc
-                    self._serial = None
+                    self._vm_port = None
+            message = self._humanize_serial_error(last_error)
             raise RuntimeError(
-                f"Unable to connect to any serial port ({', '.join(candidates)}). "
-                f"Last error: {self._humanize_serial_error(last_error)}"
+                f"Unable to connect to any serial port ({', '.join(candidates)}). Last error: {message}"
             )
 
     def reconnect(self) -> None:
@@ -138,13 +146,15 @@ class PressureAdapter:
         """Tear down the serial connection and stop background threads."""
         with self._lock:
             self._stop_reader()
-            if self._serial:
+            port = self._vm_port
+            self._vm_port = None
+            if port is not None:
                 try:
-                    self._serial.close()
+                    port.close()
                 except Exception:  # noqa: BLE001 - best effort
                     pass
-            self._serial = None
             self.protocol = None
+            self._last_close_ts = time.monotonic()
 
     def read(self, timeout: float = 0.0) -> Optional[PressureReading]:
         """
@@ -166,36 +176,17 @@ class PressureAdapter:
                 return
             yield reading
 
+    # ------------------------------------------------------------------ #
+    # Command helpers                                                    #
+    # ------------------------------------------------------------------ #
     def _set_target(self, target_mm_hg: float) -> None:
-        """
-        Update the pressure setpoint. Both command dialects are sent so either
-        protocol will respond.
-        """
-        if self.protocol != "thin":
-            self._last_setpoint = float(target_mm_hg)
-        integer = int(round(target_mm_hg))
-        commands = (
-            f"SET P={target_mm_hg:.2f}",
-            f"SET P={integer}",
-            f"SET:{target_mm_hg:.2f}",
-            f"<{integer}>",
-            f"P {integer}",
-            f"P:{integer}",
-            f"P={integer}",
-            f"SET P {integer}",
-            f"SET_PRESSURE {integer}",
-            f"sp {integer}",
-            f"SP {integer}",
-        )
+        """Queue a new pressure setpoint command."""
+        value = float(target_mm_hg)
         with self._lock:
-            if not self._serial:
+            if not self._vm_port:
                 return
-            for command in commands:
-                payload = f"{command}\n".encode("ascii", errors="ignore")
-                try:
-                    self._serial.write(payload)
-                except Exception:  # noqa: BLE001 - ignore transient write failures
-                    continue
+            self._last_command_value = value
+            self._vm_port.set_pressure(value)
 
     def set_pressure(self, target_mm_hg: float) -> None:
         """Legacy entrypoint retained to catch direct device usage."""
@@ -204,57 +195,38 @@ class PressureAdapter:
             "Route setpoint changes through SessionController.apply_setpoint()."
         )
 
-    # Internal helpers -----------------------------------------------------------
-    def _open_serial(self, device: str) -> serial.Serial:
-        """Open the serial port with sane defaults."""
-        kwargs = dict(
-            baudrate=self.baud,
-            timeout=self.timeout,
-            write_timeout=0.5,
-        )
+    def query_setpoint(self) -> None:
+        """
+        Request the device to re-emit its applied setpoint.
+
+        The VasoMoto firmware continuously emits DATA lines, so we simply
+        re-issue the last command (if available) to prompt an ACK.
+        """
+        with self._lock:
+            if not self._vm_port or self._last_command_value is None:
+                return
+            self._vm_port.tx_q.put(f"SET P={self._last_command_value:.1f}")
+
+    # ------------------------------------------------------------------ #
+    # Internal helpers                                                   #
+    # ------------------------------------------------------------------ #
+    def _open_port(self, device: str) -> VasoMotorPort:
         try:
-            return serial.Serial(device, **kwargs)
-        except PermissionError as exc:
+            return VasoMotorPort(
+                device,
+                baud=self.baud,
+                read_timeout=max(0.02, min(self.timeout, 0.2)),
+                write_timeout=0.2,
+            )
+        except serial.SerialException as exc:
             owner = self._guess_port_owner(device)
             if owner:
-                raise PermissionError(
-                    f"Port {device} appears busy (in use by {owner})."
+                raise serial.SerialException(
+                    f"Port {device} appears busy (likely used by {owner})."
                 ) from exc
             raise
 
-    def _detect_protocol(self) -> None:
-        """Probe the connected device to determine telemetry format."""
-        assert self._serial is not None
-        try:
-            self._serial.reset_input_buffer()
-        except Exception:
-            pass
-
-        try:
-            self._serial.write(b"?\n")
-        except Exception:
-            pass
-
-        deadline = time.time() + 1.5
-        while time.time() < deadline:
-            line = self._readline()
-            if not line:
-                continue
-            if self.DATA_REGEX.search(line):
-                self.protocol = "thin"
-                return
-            if self.LEGACY_REGEX.search(line):
-                self.protocol = "legacy"
-                return
-            if self.CSV_REGEX.search(line):
-                self.protocol = "csv"
-                return
-
-        # Default to legacy if no conclusive telemetry is observed.
-        self.protocol = "legacy"
-
     def _start_reader(self) -> None:
-        """Launch the background telemetry reader thread."""
         self._stop_event.clear()
         if self._reader_thread and self._reader_thread.is_alive():
             return
@@ -262,7 +234,6 @@ class PressureAdapter:
         self._reader_thread.start()
 
     def _stop_reader(self) -> None:
-        """Stop the background reader thread."""
         self._stop_event.set()
         if self._reader_thread and self._reader_thread.is_alive():
             self._reader_thread.join(timeout=0.5)
@@ -271,59 +242,44 @@ class PressureAdapter:
             self._queue.queue.clear()
 
     def _reader_loop(self) -> None:
-        """Continuously read telemetry lines and publish structured readings."""
-        assert self._serial is not None
         while not self._stop_event.is_set():
-            line = self._readline()
-            if not line:
+            port = self._vm_port
+            if port is None:
+                time.sleep(0.05)
                 continue
-            timestamp = time.perf_counter()
-            data_match = self.DATA_REGEX.search(line)
-            if data_match:
-                p_meas = self._safe_float(data_match.group(2))
-                p_set = self._safe_float(data_match.group(3))
-                setpoint = p_set if p_set is not None else self._last_setpoint
-                reading = PressureReading(p1=p_meas, p2=None, setpoint=setpoint, raw=line, t=timestamp)
-                if p_set is not None:
-                    self._handle_setpoint_feedback(p_set)
+            try:
+                event = port.rx_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            kind = event[0]
+            if kind == "DATA":
+                payload = event[1]
+                if not isinstance(payload, dict):
+                    continue
+                raw = str(payload.get("raw", ""))
+                pressure = self._safe_float(payload.get("p"))
+                setpoint = self._safe_float(payload.get("p_set"))
+                device_time = self._safe_float(payload.get("t_ms"))
+                reading = PressureReading(
+                    p1=pressure,
+                    p2=None,
+                    setpoint=setpoint,
+                    raw=raw,
+                    t=time.perf_counter(),
+                    device_time_ms=device_time,
+                )
                 self._publish(reading)
-                continue
-
-            match = self.CSV_REGEX.search(line) or self.LEGACY_REGEX.search(line)
-            p1 = p2 = setpoint = None
-            explicit_setpoint: Optional[float] = None
-            if match:
-                p1 = self._safe_float(match.group(1))
-                p2 = self._safe_float(match.group(2))
-                if match.lastindex and match.group(match.lastindex):
+                if setpoint is not None:
+                    self._handle_setpoint_feedback(setpoint)
+            elif kind == "ACK":
+                raw_ack = str(event[1])
+                match = self.ACK_RE.match(raw_ack)
+                if match:
                     try:
-                        explicit_setpoint = float(match.group(match.lastindex))
+                        value = float(match.group(1))
+                        self._handle_setpoint_feedback(value)
                     except ValueError:
-                        explicit_setpoint = None
-                if explicit_setpoint is not None:
-                    setpoint = explicit_setpoint
-            else:
-                explicit_setpoint = self._extract_setpoint_echo(line)
-                if explicit_setpoint is not None:
-                    setpoint = explicit_setpoint
-            if setpoint is None:
-                setpoint = self._last_setpoint
-            reading = PressureReading(p1=p1, p2=p2, setpoint=setpoint, raw=line, t=timestamp)
-            if explicit_setpoint is not None:
-                self._handle_setpoint_feedback(explicit_setpoint)
-            self._publish(reading)
-
-    @staticmethod
-    def _safe_float(value: Optional[str]) -> Optional[float]:
-        if value is None:
-            return None
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            return None
-        if math.isnan(numeric):
-            return None
-        return numeric
+                        continue
 
     def _publish(self, reading: PressureReading) -> None:
         """Push a reading onto the queue, dropping the oldest on overflow."""
@@ -339,61 +295,35 @@ class PressureAdapter:
             except queue.Full:
                 pass
 
-    def query_setpoint(self) -> None:
-        """Request the device to emit its current target setpoint."""
-        with self._lock:
-            if not self._serial:
-                return
-            try:
-                self._serial.write(b"?SP\n")
-            except Exception:
-                return
-
-    def _extract_setpoint_echo(self, line: str) -> Optional[float]:
-        """Parse device-emitted setpoint echoes like 'SP:60.0'."""
-        text = line.strip()
-        if not text:
-            return None
-        upper = text.upper()
-        prefix = None
-        for candidate in ("SP:", "SETPOINT:", "TARGET:"):
-            if upper.startswith(candidate):
-                prefix = candidate
-                break
-        if prefix is None:
-            return None
-        try:
-            return float(text[len(prefix) :].strip())
-        except ValueError:
-            return None
-
     def _handle_setpoint_feedback(self, value: float) -> None:
         """Update internal caches and notify listeners of a new target."""
         numeric = float(value)
-        self._last_setpoint = numeric
-        if (
-            self._last_notified_setpoint is not None
-            and abs(self._last_notified_setpoint - numeric) < 1e-3
-        ):
-            return
-        self._last_notified_setpoint = numeric
-        if not self._setpoint_callback:
-            return
-        try:
-            self._setpoint_callback(numeric)
-        except Exception:
-            pass
+        self._last_callback_value = self._notify_setpoint_once(
+            numeric, self._last_callback_value
+        )
 
-    def _readline(self) -> str:
-        """Best-effort UTF-8 decode of a single telemetry line."""
-        with self._lock:
-            if not self._serial:
-                return ""
-            try:
-                data = self._serial.readline() or b""
-            except Exception:
-                return ""
-        return data.decode(errors="replace").strip()
+    def _notify_setpoint_once(self, value: float, last_value: Optional[float]) -> Optional[float]:
+        if self._setpoint_callback is None:
+            return last_value
+        if last_value is not None and abs(value - last_value) < 1e-3:
+            return last_value
+        try:
+            self._setpoint_callback(value)
+        except Exception:
+            return last_value
+        return value
+
+    @staticmethod
+    def _safe_float(value: object) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if numeric != numeric:  # NaN check
+            return None
+        return numeric
 
     @staticmethod
     def _humanize_serial_error(exc: Optional[Exception]) -> str:
@@ -425,3 +355,10 @@ class PressureAdapter:
             if hint:
                 break
         return hint
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
