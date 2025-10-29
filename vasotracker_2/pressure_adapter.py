@@ -80,6 +80,9 @@ class PressureAdapter:
         self._last_command_value: Optional[float] = None
         self._last_close_ts: float = 0.0
         self.protocol: Optional[str] = None  # For compatibility with existing UI/tests.
+        self._keepalive_interval_s = 0.8
+        self._keepalive_evt = threading.Event()
+        self._keepalive_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------ #
     # Public API                                                         #
@@ -129,6 +132,7 @@ class PressureAdapter:
                     self.port = device
                     self.protocol = "vasomotor"
                     self._start_reader()
+                    self._start_keepalive()
                     return
                 except Exception as exc:  # noqa: BLE001 - surface raw message
                     last_error = exc
@@ -146,6 +150,7 @@ class PressureAdapter:
         """Tear down the serial connection and stop background threads."""
         with self._lock:
             self._stop_reader()
+            self._stop_keepalive()
             port = self._vm_port
             self._vm_port = None
             if port is not None:
@@ -241,6 +246,20 @@ class PressureAdapter:
         with self._queue.mutex:
             self._queue.queue.clear()
 
+    def _start_keepalive(self) -> None:
+        if self._keepalive_thread and self._keepalive_thread.is_alive():
+            return
+        self._keepalive_evt.clear()
+        self._keepalive_thread = threading.Thread(target=self._keepalive_loop, daemon=True)
+        self._keepalive_thread.start()
+
+    def _stop_keepalive(self) -> None:
+        self._keepalive_evt.set()
+        thread = self._keepalive_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=0.5)
+        self._keepalive_thread = None
+
     def _reader_loop(self) -> None:
         while not self._stop_event.is_set():
             port = self._vm_port
@@ -280,6 +299,18 @@ class PressureAdapter:
                         self._handle_setpoint_feedback(value)
                     except ValueError:
                         continue
+
+    def _keepalive_loop(self) -> None:
+        while not self._keepalive_evt.wait(self._keepalive_interval_s):
+            with self._lock:
+                port = self._vm_port
+                value = self._last_command_value
+                if port is None or value is None:
+                    continue
+                try:
+                    port.tx_q.put(f"SET P={value:.1f}")
+                except Exception:
+                    continue
 
     def _publish(self, reading: PressureReading) -> None:
         """Push a reading onto the queue, dropping the oldest on overflow."""
@@ -361,4 +392,3 @@ class PressureAdapter:
             self.close()
         except Exception:
             pass
-

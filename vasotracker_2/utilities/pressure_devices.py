@@ -158,6 +158,9 @@ class ArduinoPressureDevice:
         )
         self._last_sent_set_mmHg: Optional[float] = None
         self._interval = 1.0 / max(1.0, stream_rate_hz)
+        self._keepalive_interval_s = 0.8
+        self._keepalive_evt = threading.Event()
+        self._keepalive_thread: Optional[threading.Thread] = None
         self._vm_last_device_time: Optional[float] = None
 
     def bind_worker(self, worker: ArduinoSerialWorker) -> None:
@@ -169,6 +172,7 @@ class ArduinoPressureDevice:
             self.worker.start()
             self._queue_command("PING")
             self._queue_command("START")
+            self._start_keepalive()
             return
 
         if not getattr(self.arduino, "is_connected", False):
@@ -177,6 +181,7 @@ class ArduinoPressureDevice:
         self._stop_evt.clear()
         self._queue_command("PING")
         self._queue_command("START")
+        self._start_keepalive()
 
         if self._thread and self._thread.is_alive():
             return
@@ -187,6 +192,7 @@ class ArduinoPressureDevice:
     def stop(self) -> None:
         if self.worker is not None:
             self._queue_command("STOP")
+            self._stop_keepalive()
             return
 
         self._stop_evt.set()
@@ -194,6 +200,7 @@ class ArduinoPressureDevice:
         if self._thread:
             self._thread.join(timeout=1.0)
             self._thread = None
+        self._stop_keepalive()
 
     def set_pressure(self, value_mmHg: float) -> None:
         v = max(0.0, float(value_mmHg))
@@ -242,6 +249,29 @@ class ArduinoPressureDevice:
                 self.arduino.sendData(f"{command}\n")
         except Exception:
             pass
+
+    def _start_keepalive(self) -> None:
+        if self._keepalive_thread and self._keepalive_thread.is_alive():
+            return
+        self._keepalive_evt.clear()
+        self._keepalive_thread = threading.Thread(target=self._keepalive_loop, daemon=True)
+        self._keepalive_thread.start()
+
+    def _stop_keepalive(self) -> None:
+        self._keepalive_evt.set()
+        thread = self._keepalive_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=0.5)
+        self._keepalive_thread = None
+
+    def _keepalive_loop(self) -> None:
+        while not self._keepalive_evt.wait(self._keepalive_interval_s):
+            value = self._last_sent_set_mmHg
+            if value is None:
+                continue
+            if self.worker is None and not getattr(self.arduino, "is_connected", False):
+                continue
+            self._queue_command(f"SET P={value:.1f}")
 
     def _reader_loop(self) -> None:
         while not self._stop_evt.is_set():
