@@ -27,7 +27,10 @@ from .pressure_devices import (
 from .VT_Arduino import Arduino
 from .arduino_async_worker import ArduinoSerialWorker
 from .arduino_link_monitor import LinkMonitor
-from ..setpoint_bus import notify_setpoint
+try:
+    from ..setpoint_bus import notify_setpoint
+except ImportError:
+    from setpoint_bus import notify_setpoint
 
 
 def is_pydaqmx_available() -> bool:
