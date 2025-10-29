@@ -27,6 +27,7 @@ from .pressure_devices import (
 from .VT_Arduino import Arduino
 from .arduino_async_worker import ArduinoSerialWorker
 from .arduino_link_monitor import LinkMonitor
+from ..setpoint_bus import notify_setpoint
 
 
 def is_pydaqmx_available() -> bool:
@@ -505,10 +506,12 @@ class PressureController:
         pressure_protocol_settings = self.model.state.toolbar.pressure_protocol
         self._set_var_safe(pressure_protocol_settings.set_pressure, f"{value:.2f}")
 
-        try:
-            self._device_ctx.device.set_pressure(value)
-        except Exception as exc:
-            print("set_pressure failed:", exc)
+        handled = notify_setpoint(value, source="PressureController")
+        if not handled:
+            try:
+                self._device_ctx.device.set_pressure(value)
+            except Exception as exc:
+                print("set_pressure failed:", exc)
 
         if update_table:
             try:

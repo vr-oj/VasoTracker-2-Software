@@ -11,21 +11,24 @@ from __future__ import annotations
 import shutil
 import threading
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Deque, Dict, Optional, Tuple
 
 try:  # Support running as a script or imported package.
     from .camera_adapter import CameraAdapter
     from .pressure_adapter import PressureAdapter
     from .steps_engine import Step, StepsEngine
     from .writer import Writer
+    from .setpoint_bus import register_setpoint_handler, clear_setpoint_handler
 except ImportError:  # pragma: no cover - fallback for direct script execution
     from camera_adapter import CameraAdapter
     from pressure_adapter import PressureAdapter
     from steps_engine import Step, StepsEngine
     from writer import Writer
+    from setpoint_bus import register_setpoint_handler, clear_setpoint_handler
 
 
 class SessionState(Enum):
@@ -69,6 +72,7 @@ class SessionController:
         self._preflight_report: Dict[str, object] = {}
         self._setpoint_lock = threading.Lock()
         self._current_target_mmHg: float = 0.0
+        self._setpoint_events: Deque[Tuple[float, str, float]] = deque(maxlen=512)
 
         self.camera = CameraAdapter(
             index=cfg.camera_index,
@@ -85,6 +89,9 @@ class SessionController:
 
         self._pump_thread: Optional[threading.Thread] = None
         self._pump_stop = threading.Event()
+
+        register_setpoint_handler(self._ingest_external_setpoint)
+        self._record_setpoint_event(self._current_target_mmHg, "init")
 
         self._update_metadata_file()
 
@@ -184,11 +191,12 @@ class SessionController:
     def preflight_report(self) -> Dict[str, object]:
         return dict(self._preflight_report)
 
-    def apply_setpoint(self, mmHg: float) -> None:
+    def apply_setpoint(self, mmHg: float, *, source: str = "command", _from_bus: bool = False) -> None:
         """Set the hardware target and mirror it for downstream consumers."""
         value = float(mmHg)
-        self.pressure.set_pressure(value)
+        self.pressure._set_target(value)
         self.current_target_mmHg = value
+        self._record_setpoint_event(value, source)
 
     @property
     def current_target_mmHg(self) -> float:
@@ -203,6 +211,14 @@ class SessionController:
     def _on_setpoint_echo(self, value: float) -> None:
         """Mirror device-reported targets without issuing a new command."""
         self.current_target_mmHg = float(value)
+        self._record_setpoint_event(float(value), "echo")
+
+    def _ingest_external_setpoint(self, value: float, source: str) -> None:
+        """Proxy for setpoint_bus to route commands through this controller."""
+        self.apply_setpoint(value, source=source, _from_bus=True)
+
+    def _record_setpoint_event(self, value: float, source: str) -> None:
+        self._setpoint_events.append((time.time(), source, float(value)))
 
     # Internal helpers -----------------------------------------------------------
     def _preflight_camera(self) -> Dict[str, object]:
@@ -301,6 +317,10 @@ class SessionController:
             "session_folder": str(self.session_folder),
             "state": self.state.name,
             "preflight": self._preflight_report,
+            "setpoint_events": [
+                {"timestamp": ts, "source": src, "mmHg": val}
+                for ts, src, val in self._setpoint_events
+            ],
         }
         self.writer.write_metadata(metadata)
 
@@ -345,3 +365,9 @@ class SessionController:
         value = value.strip().replace(" ", "_")
         allowed = "".join(ch for ch in value if ch.isalnum() or ch in ("_", "-", "."))
         return allowed
+
+    def __del__(self) -> None:
+        try:
+            clear_setpoint_handler(self._ingest_external_setpoint)
+        except Exception:
+            pass

@@ -92,6 +92,7 @@ if "serial" not in sys.modules:
 import pytest
 
 from vasotracker_2 import session_controller as sc_module
+from vasotracker_2 import setpoint_bus
 from vasotracker_2.pressure_adapter import PressureReading
 from vasotracker_2.session_controller import SessionConfig, SessionController
 
@@ -173,7 +174,7 @@ class DummyPressureAdapter:
         except queue.Empty:
             return None
 
-    def set_pressure(self, target_mm_hg: float) -> None:
+    def _set_target(self, target_mm_hg: float) -> None:
         self.last_command = float(target_mm_hg)
 
     def queue_reading(self, reading: PressureReading) -> None:
@@ -233,9 +234,13 @@ def test_setpoint_logged_each_step(tmp_path, monkeypatch) -> None:
         )
         pressure.queue_reading(reading)
         _wait_for_rows(writer, len(commanded) + 1)
+
+        assert setpoint_bus.notify_setpoint(90.0, "test_bus") is True
+        assert session.current_target_mmHg == pytest.approx(90.0, abs=1e-6)
     finally:
         session._pump_stop.set()
         pump.join(timeout=1.0)
+        setpoint_bus.clear_setpoint_handler(session._ingest_external_setpoint)  # type: ignore[attr-defined]
 
     recorded = [row[4] for row in writer.telemetry_rows]
     assert recorded[: len(commanded)] == commanded

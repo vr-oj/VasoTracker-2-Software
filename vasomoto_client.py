@@ -34,6 +34,12 @@ except ImportError as exc:  # pragma: no cover - runtime dependency
         "pyserial is required for Arduino communication. Install with `pip install pyserial`."
     ) from exc
 
+try:
+    from vasotracker_2.setpoint_bus import notify_setpoint as _bus_notify_setpoint
+except Exception:
+    def _bus_notify_setpoint(value: float, source: str = "external") -> bool:
+        return False
+
 # Common fallback baud rates used by Arduino sketches.
 COMMON_BAUDS: List[int] = [115200, 57600, 38400, 19200, 9600]
 
@@ -311,11 +317,19 @@ class VasoMotoClient:
         Returns (success, message). Success is inferred from ACK-like telemetry
         or observing the reported pressure move toward the requested setpoint.
         """
-        if target_mmHg < 0:
-            target_mmHg = 0.0
-        if target_mmHg > self.max_pressure:
-            target_mmHg = self.max_pressure
+        try:
+            requested = float(target_mmHg)
+        except Exception:
+            requested = 0.0
+        if requested < 0:
+            requested = 0.0
+        if requested > self.max_pressure:
+            requested = self.max_pressure
 
+        if _bus_notify_setpoint(requested, source="vasomoto_client"):
+            return True, "SessionController accepted setpoint command"
+
+        target_mmHg = requested
         device_value = self._to_device_units(target_mmHg)
         baseline = self._estimate_pressure(self.last_fields)
 

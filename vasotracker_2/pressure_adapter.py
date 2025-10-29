@@ -161,7 +161,7 @@ class PressureAdapter:
                 return
             yield reading
 
-    def set_pressure(self, target_mm_hg: float) -> None:
+    def _set_target(self, target_mm_hg: float) -> None:
         """
         Update the pressure setpoint. Both command dialects are sent so either
         protocol will respond.
@@ -189,6 +189,13 @@ class PressureAdapter:
                     self._serial.write(payload)
                 except Exception:  # noqa: BLE001 - ignore transient write failures
                     continue
+
+    def set_pressure(self, target_mm_hg: float) -> None:
+        """Legacy entrypoint retained to catch direct device usage."""
+        raise RuntimeError(
+            "PressureAdapter.set_pressure() is no longer available. "
+            "Route setpoint changes through SessionController.apply_setpoint()."
+        )
 
     # Internal helpers -----------------------------------------------------------
     def _open_serial(self, device: str) -> serial.Serial:
@@ -381,4 +388,3 @@ class PressureAdapter:
             if hint:
                 break
         return hint
-
