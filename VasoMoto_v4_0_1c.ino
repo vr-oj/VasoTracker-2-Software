@@ -1,7 +1,7 @@
 /* This version includes external input to change pressure. All tension recording functions are disabled. Can be re-enabled for a second pressure
    transducer, but name should be changed to prevent confusion. */
 
-/* NOTE: This version (4.0.1b) is also specifically adapted to do slow pressure increases over time. The fast pulse functionality is removed
+/* NOTE: This version (4.0.1c) is also specifically adapted to do slow pressure increases over time. The fast pulse functionality is removed
    in favor of this. For rapid pulse pressure shifting, see version 4.0.1.*/
 
 #include <Wire.h>
@@ -461,7 +461,7 @@ void bootup() {
       buffidx++;
     }
   }
-  printWords(0, 1, 80, 120, ST77XX_RED, "v4.0.1b");
+  printWords(0, 1, 80, 120, ST77XX_RED, "v4.0.1c");
     if (startup.valid == false) {
     delay(1000);
     tft.fillRect(0, 100, 160, 28, ST77XX_BLACK);
