@@ -132,7 +132,8 @@ try:
 except:
     micromanager_available = False
 
-print("Is PYDAQMX = ", is_pydaqmx_available())
+# Cache optional dependency availability without printing at startup.
+_PYDAQMX_AVAILABLE = is_pydaqmx_available()
 
 # Constants
 SYS32_PATH = "C:/WINDOWS/SYSTEM32/DRIVERs/"
@@ -3584,9 +3585,10 @@ class PressureDevicePane(ToolbarPane):
             column=1,
         )
 
+        pydaq_text = "Yes" if _PYDAQMX_AVAILABLE else "No"
         self.pydaqmx_status_label = ctk.CTkLabel(
             self,
-            text=f"PyDAQmx available: {is_pydaqmx_available()}",
+            text=f"PyDAQmx available: {pydaq_text}",
             font=(default_font, default_font_size - 1),
         )
         self.pydaqmx_status_label.grid(
@@ -3649,6 +3651,18 @@ class PressureDevicePane(ToolbarPane):
 
         self._device_change_pending = True
         self._apply_field_states()
+
+        selected_type = self.model_vars.toolbar.pressure_device.device_type.get().strip().lower()
+        if selected_type in ("ni", "ni-daq", "nidaq") and not _PYDAQMX_AVAILABLE:
+            tmb.showinfo(
+                "NI-DAQ unavailable",
+                "niDAQmx is not installed, so NI-DAQ pressure control is disabled. "
+                "Install niDAQmx to use this option or select Arduino instead.",
+            )
+            self.model_vars.toolbar.pressure_device.device_type.set("None")
+            self._apply_field_states()
+            self._device_change_pending = False
+            return
 
         controller = self.model_vars.pressure_controller
         if controller is None:
@@ -4388,7 +4402,7 @@ class Menus:
         self.settings_menu.add_separator()
         self.settings_menu.add_command(label="Pressure Hardware")
 
-        if is_pydaqmx_available():
+        if _PYDAQMX_AVAILABLE:
             self.settings_menu.add_command(label="Configure Pressure Protocol")
 
         notepad_menu = tk.Menu(self.menu_bar, tearoff=0)
@@ -5729,7 +5743,7 @@ class Controller:
         settings_menu.entryconfig(
             settings_menu.index("Pressure Hardware"), command=self.show_pressure_hardware_popup
         )
-        if is_pydaqmx_available():
+        if _PYDAQMX_AVAILABLE:
             # Create the "Pressure Protocol" dropdown menu
             settings_menu = menu.settings_menu
             settings_menu.entryconfig(
@@ -6471,9 +6485,6 @@ if __name__ == "__main__":
         sys.exit()
     else:
         mmc = CMMCorePlus(adapter_paths=[mm_path, SYS32_PATH, BASLER_PATH, BASLER_PATH2])
-
-    if not is_pydaqmx_available():
-        tmb.showinfo("Warning", "niDAQmx not found. Please install to enable automatic pressure control.")
 
     # **Schedule Controller Initialization on the Main Thread (No Freezing)**
     root.after(2000, initialize_controller)  # Start loading the app after splash screen
