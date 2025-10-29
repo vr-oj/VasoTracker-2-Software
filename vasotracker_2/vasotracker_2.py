@@ -465,6 +465,7 @@ class DataAcqPaneState:
     diam_percent: DoubleVar = field(default_factory=DoubleVar)
     caliper_length: DoubleVar = field(default_factory=DoubleVar)
     countdown: StringVar = field(default_factory=lambda: StringVar(value="0:00:00"))
+    device_set_pressure: StringVar = field(default_factory=lambda: StringVar(value="0.0"))
 
 
 
@@ -3321,6 +3322,12 @@ class DataAcquisitionPane(ToolbarPane):
         super().__init__(parent, height=400, width=400)
         self.model_vars = model_vars
         sv = model_vars.toolbar.data_acq
+        protocol_state = model_vars.toolbar.pressure_protocol
+        sv.device_set_pressure.set(protocol_state.device_set_pressure.get())
+        self._device_set_pressure_trace = protocol_state.device_set_pressure.trace_add(
+            "write", lambda *_: sv.device_set_pressure.set(protocol_state.device_set_pressure.get())
+        )
+        self.bind("<Destroy>", self._on_destroy, add="+")
 
         self.pack(side=tk.LEFT, anchor=tk.N, padx=5, pady=5, fill=tk.Y)
         self.frame_label = ctk.CTkLabel(self, text="Data Acquisition", font=(default_font, 16, 'bold'), fg_color=frame_label_color, height=frame_label_height, text_color='white').grid(row=0, column=0, columnspan=4,padx=1,pady=1, sticky="nsew")
@@ -3338,7 +3345,7 @@ class DataAcquisitionPane(ToolbarPane):
         padx = (0,30)
 
         # Configuring the grid
-        for col in range(3):
+        for col in range(4):
             self.grid_columnconfigure(col, weight=1)
 
         # Labels for OD, ID, and Pressure
@@ -3376,6 +3383,38 @@ class DataAcquisitionPane(ToolbarPane):
         ctk.CTkLabel(self, text="Time (hh:mm:ss):", anchor="center", font=(default_font, default_font_size)).grid(row=3, column=3, padx=padx, pady=0, sticky=tk.EW)
         self.time_entry = ctk.CTkEntry(self, textvariable=sv.time_string, font=(default_font, entry_font_size, "bold"), justify=justify, width=entry_width, fg_color=entry_fg_color, text_color=color_gray,  state=tk.DISABLED)
         self.time_entry.grid(row=4, column=3,padx=padx, pady=5)
+
+        ctk.CTkLabel(
+            self,
+            text="Selected pressure (mmHg):",
+            anchor="center",
+            font=(default_font, default_font_size),
+        ).grid(row=5, column=0, columnspan=4, padx=(20, 30), pady=(10, 0), sticky=tk.EW)
+        self.device_set_pressure_entry = ctk.CTkEntry(
+            self,
+            textvariable=sv.device_set_pressure,
+            font=(default_font, entry_font_size, "bold"),
+            justify=justify,
+            width=entry_width,
+            fg_color=entry_fg_color,
+            text_color=color_vt,
+            state=tk.DISABLED,
+        )
+        self.device_set_pressure_entry.grid(row=6, column=0, columnspan=4, padx=(20, 30), pady=5, sticky=tk.EW)
+
+    def _on_destroy(self, event) -> None:
+        if event.widget is not self:
+            return
+        trace = getattr(self, "_device_set_pressure_trace", None)
+        if not trace:
+            return
+        try:
+            self.model_vars.toolbar.pressure_protocol.device_set_pressure.trace_remove(
+                "write", trace
+            )
+        except tk.TclError:
+            pass
+        self._device_set_pressure_trace = None
 
 
 
@@ -3909,6 +3948,7 @@ class PressureControlPane(ToolbarPane):
                 formatted = f"{numeric:.1f}"
                 protocol.device_set_pressure.set(formatted)
                 protocol.device_set_source.set(source)
+                self.model_vars.toolbar.data_acq.device_set_pressure.set(formatted)
                 self._device_display_var.set(f"Device set pressure: {formatted} mmHg")
                 self._sync_manual_slider(numeric)
                 was_pending = self._pending_gui_event
@@ -3923,6 +3963,7 @@ class PressureControlPane(ToolbarPane):
                 formatted = f"{numeric:.1f}"
                 protocol.device_set_pressure.set(formatted)
                 protocol.device_set_source.set(source)
+                self.model_vars.toolbar.data_acq.device_set_pressure.set(formatted)
                 self._device_display_var.set(f"Device set pressure: {formatted} mmHg")
                 self._sync_manual_slider(numeric)
                 self._apply_device_state(self._colour_neutral)
