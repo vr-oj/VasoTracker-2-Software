@@ -15,7 +15,7 @@ sys.path.insert(0, spec_dir)
 import version
 from version import __version__
 
-added_files = [("music", "music"), ("images", "images"), ("SampleData2", "SampleData2"), ('settings.toml', '.'), ('MMConfig.cfg', '.'), ('Basler.cfg', '.'), ('VasoTrackerblue.json', '.'), ('pacman', 'pacman'), ('space-invaders', 'space-invaders')]
+added_files = [("music", "music"), ("images", "images"), ("SampleData2", "SampleData2"), ('settings.toml', '.'), ('MMConfig.cfg', '.'), ('Basler.cfg', '.'), ('VasoTrackerblue.json', '.')]
 
 a = Analysis(
     ['vasotracker_2.py'],
