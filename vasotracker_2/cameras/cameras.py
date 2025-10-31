@@ -17,8 +17,14 @@ import sys
 # Utility functions
 def get_resource_path(relative_path):
     """Get the path to a resource, whether it's bundled with PyInstaller or not."""
-    base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
-    return os.path.join(base_path, relative_path)
+    package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    base_path = getattr(sys, '_MEIPASS', package_root)
+    candidate_path = os.path.join(base_path, relative_path)
+    if os.path.exists(candidate_path):
+        return candidate_path
+
+    fallback_path = os.path.join(os.path.abspath("."), relative_path)
+    return fallback_path if os.path.exists(fallback_path) else candidate_path
 
 
 

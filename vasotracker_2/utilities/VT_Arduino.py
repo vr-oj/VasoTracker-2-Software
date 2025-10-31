@@ -19,6 +19,7 @@ pulling in UI dependencies or platform checks.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import re
 from typing import Generator, Optional
 
 try:
@@ -51,6 +52,7 @@ class Arduino:
         baud: int = 115_200,
         timeout: float = 0.1,
         auto_connect: bool = True,
+        show_errors: bool = True,
     ) -> None:
         self.port = port
         self.baud = baud
@@ -58,6 +60,8 @@ class Arduino:
         self.serial: Optional[serial.SerialBase] = None
         self._last_error: Optional[Exception] = None
         self._error_notified: bool = False
+        self._last_set_mmHg: Optional[float] = None
+        self._show_errors = show_errors
 
         if auto_connect:
             self.connect()
@@ -112,19 +116,39 @@ class Arduino:
 
     def sendData(self, text: str) -> None:
         """
-        Send ASCII text to the Arduino, appending a newline if necessary.
-
-        The method name is retained for backwards compatibility with legacy
-        code that previously called into this module.
+        Send ASCII text to the Arduino and bridge modern commands to the
+        legacy angle-bracket protocol expected by older firmware.
         """
         if not self.serial or not self.serial.is_open:
-            raise RuntimeError("Serial port is not open. Call `connect()` first.")
+            return
 
         if not text.endswith("\n"):
             text += "\n"
-        payload = text.encode("ascii", errors="ignore")
-        self.serial.write(payload)
-        self.serial.flush()
+
+        try:
+            payload = text.encode("utf-8")
+            self.serial.write(payload)
+            self.serial.flush()
+        except Exception as exc:
+            print("Serial write error:", exc)
+            return
+
+        match = re.search(
+            r"(?:^|\b)(?:SET|SP|P|PRESSURE)\s*[:= ]\s*(-?\d+(?:\.\d+)?)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return
+
+        try:
+            value = float(match.group(1))
+            legacy = f"<{int(round(value))}>"
+            self.serial.write(legacy.encode("utf-8"))
+            self.serial.flush()
+            self._last_set_mmHg = value
+        except Exception as exc:
+            print("Legacy bridge write error:", exc)
 
     def readline(self, timeout: float = 0.1) -> Optional[str]:
         """
@@ -162,15 +186,17 @@ class Arduino:
             f"Unable to open serial port '{self.port}':\n{exc}\n\n"
             "Tip: close Arduino Serial Monitor or any app using the port."
         )
-        try:
-            # Lazy import keeps this utility usable in headless contexts.
-            from tkinter import messagebox
+        if self._show_errors:
+            try:
+                # Lazy import keeps this utility usable in headless contexts.
+                from tkinter import messagebox
 
-            messagebox.showerror("Arduino connection failed", message)
-            self._error_notified = True
-        except Exception:
+                messagebox.showerror("Arduino connection failed", message)
+            except Exception:
+                print("Arduino connection failed:", message)
+        else:
             print("Arduino connection failed:", message)
-            self._error_notified = True
+        self._error_notified = True
 
 
 @contextmanager

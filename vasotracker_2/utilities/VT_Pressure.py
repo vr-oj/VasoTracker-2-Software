@@ -11,10 +11,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 import math
 import time
 import tkinter.messagebox as tmb
+from tkinter import TclError
 
 from .pressure_devices import (
     ArduinoPressureDevice,
@@ -24,6 +25,12 @@ from .pressure_devices import (
     SimPressureDevice,
 )
 from .VT_Arduino import Arduino
+from .arduino_async_worker import ArduinoSerialWorker
+from .arduino_link_monitor import LinkMonitor
+try:
+    from ..setpoint_bus import notify_setpoint
+except ImportError:
+    from setpoint_bus import notify_setpoint
 
 
 def is_pydaqmx_available() -> bool:
@@ -49,6 +56,8 @@ class DeviceContext:
     device: PressureDevice
     type_name: str
     arduino: Optional[Arduino] = None
+    worker: Optional[ArduinoSerialWorker] = None
+    monitor: Optional[LinkMonitor] = None
     nidaq_task: Optional["PyDAQmx.Task"] = None  # type: ignore[name-defined]
 
 
@@ -79,12 +88,15 @@ class PressureController:
         self.pressure_start_time: Optional[float] = None
         self.next_pressure_update_time: float = 0.0
         self.multiplier: int = 1
+        self._direction: int = 0
         self.protocol_completed: bool = False
         self.stop_protocol_on_completion: bool = True
         self.completed: bool = False
         self.last_update_time: Optional[float] = None
         self.update_threshold: float = 1.0
         self.set_pressure: float = 0.0
+        self._status_reset_job: Optional[str] = None
+        self._default_status_text = self._capture_status_text()
 
         # Configure from persisted settings
         self.configure_from_state(start_immediately=False)
@@ -92,6 +104,130 @@ class PressureController:
     # ------------------------------------------------------------------
     # Device configuration
     # ------------------------------------------------------------------
+    def _capture_status_text(self) -> str:
+        status_bar = getattr(self.view, "status_bar", None)
+        if status_bar is None:
+            return ""
+        try:
+            return str(status_bar.cget("text"))
+        except Exception:
+            return ""
+
+    def _notify_status(self, message: str, *, persist: bool = False, log: bool = True) -> None:
+        if log:
+            print(f"[PressureController] {message}")
+
+        status_bar = getattr(self.view, "status_bar", None)
+        if status_bar is None:
+            return
+
+        try:
+            status_bar.configure(text=message)
+        except Exception:
+            return
+
+        if persist or not self._default_status_text:
+            self._status_reset_job = None
+            return
+
+        if self._status_reset_job is not None:
+            try:
+                status_bar.after_cancel(self._status_reset_job)
+            except Exception:
+                pass
+            self._status_reset_job = None
+
+        def _reset_status() -> None:
+            try:
+                status_bar.configure(text=self._default_status_text)
+            except Exception:
+                pass
+            finally:
+                self._status_reset_job = None
+
+        self._status_reset_job = status_bar.after(8000, _reset_status)
+
+    @staticmethod
+    def _summarise_exception(exc: Exception) -> str:
+        text = str(exc).strip()
+        return text if text else exc.__class__.__name__
+
+    def _discover_serial_ports(self) -> List[Tuple[str, str]]:
+        try:
+            from serial.tools import list_ports
+        except Exception:
+            return []
+
+        ports: List[Tuple[str, str]] = []
+        for info in list_ports.comports():
+            description = " ".join(
+                part for part in (info.manufacturer, info.description, info.hwid) if part
+            ).strip()
+            ports.append((info.device, description or info.device))
+        return ports
+
+    def list_serial_ports(self) -> List[Tuple[str, str]]:
+        """Return a list of (device, description) tuples for available serial ports."""
+        return self._discover_serial_ports()
+
+    def notify_status(self, message: str, *, persist: bool = False, log: bool = True) -> None:
+        """Public helper for UI components that need to surface controller status messages."""
+        self._notify_status(message, persist=persist, log=log)
+
+    def _dispatch_to_ui(self, func: Callable[[], None]) -> None:
+        """Execute `func` on the UI thread if possible."""
+        status_bar = getattr(self.view, "status_bar", None)
+        if status_bar is not None:
+            try:
+                status_bar.after(0, func)
+                return
+            except Exception:
+                pass
+        after = getattr(self.view, "after", None)
+        if callable(after):
+            try:
+                after(0, func)
+                return
+            except Exception:
+                pass
+        func()
+
+    def _notify_status_async(self, message: str, *, persist: bool = False, log: bool = True) -> None:
+        """Thread-safe wrapper around `_notify_status`."""
+        self._dispatch_to_ui(lambda m=message, p=persist, l=log: self._notify_status(m, persist=p, log=l))
+
+    @staticmethod
+    def _var_to_float(var, default: float = 0.0) -> float:
+        """Safely extract a float from a Tk variable, tolerating blanks."""
+        if var is None:
+            return default
+        try:
+            value = var.get()
+        except TclError:
+            return default
+        except Exception:
+            return default
+        if isinstance(value, str):
+            value = value.strip()
+            if value == "":
+                return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _set_var_safe(var, value) -> None:
+        """Attempt to set a Tk variable, ignoring stale widget callbacks."""
+        if var is None:
+            return
+        try:
+            var.set(value)
+        except TclError:
+            pass
+        except Exception:
+            pass
+
     def configure_from_state(self, start_immediately: bool = False) -> None:
         """Reconfigure the active device based on toolbar/settings state."""
         settings = getattr(self.model.state.toolbar, "pressure_device", None)
@@ -133,6 +269,8 @@ class PressureController:
         type_name: str,
         *,
         arduino: Optional[Arduino] = None,
+        worker: Optional[ArduinoSerialWorker] = None,
+        monitor: Optional[LinkMonitor] = None,
         nidaq_task: Optional["PyDAQmx.Task"] = None,  # type: ignore[name-defined]
     ) -> None:
         ctx = self._device_ctx
@@ -140,6 +278,11 @@ class PressureController:
             ctx.device.stop()
         except Exception:
             pass
+        if ctx.worker is not None:
+            try:
+                ctx.worker.stop()
+            except Exception:
+                pass
         if ctx.arduino is not None:
             try:
                 ctx.arduino.close()
@@ -159,45 +302,118 @@ class PressureController:
             device=device,
             type_name=type_name,
             arduino=arduino,
+            worker=worker,
+            monitor=monitor,
             nidaq_task=nidaq_task,
         )
 
-        if type_name == "none":
-            self.view.toolbar.pressure_protocol_settings.set_lock_state()
-        else:
-            self.view.toolbar.pressure_protocol_settings.set_unlock_state()
+        toolbar = getattr(self.view, "toolbar", None)
+        if toolbar is not None:
+            try:
+                if type_name == "none":
+                    toolbar.pressure_protocol_settings.set_lock_state()
+                    toolbar.pressure_control_settings.set_lock_state()
+                else:
+                    toolbar.pressure_protocol_settings.set_unlock_state()
+                    toolbar.pressure_control_settings.set_unlock_state()
+            except Exception:
+                pass
 
     def _setup_arduino_device(self, port: str, baud: int, start_immediately: bool = False) -> None:
-        if not port:
+        requested = (port or "").strip()
+        auto_detect = requested.lower() in ("", "auto", "autodetect", "detect")
+        discovered = self._discover_serial_ports()
+
+        if not discovered and auto_detect:
             self._set_device(NullPressureDevice(), "none")
-            return
-        try:
-            arduino = Arduino(port=port, baud=baud)
-        except Exception as exc:
-            tmb.showinfo(
-                "Arduino connection failed",
-                f"Unable to open serial port '{port}':\n{exc}",
+            self._notify_status(
+                "No serial ports detected. Connect the Arduino and try again.",
+                persist=True,
             )
-            self._set_device(NullPressureDevice(), "none")
             return
 
-        if not arduino.is_connected:
-            if not getattr(arduino, "error_notified", False):
-                last_error = getattr(arduino, "last_error", None)
-                if last_error is not None:
-                    tmb.showinfo(
-                        "Arduino connection failed",
-                        f"Unable to open serial port '{port}':\n{last_error}",
+        monitor = LinkMonitor(expected_rx_hz=5.0, warmup_s=1.2, stale_s=2.5)
+        device = ArduinoPressureDevice(worker=None)
+        last_status: Dict[str, Optional[str]] = {"event": None}
+
+        def update_port_variable(device_name: str) -> None:
+            def setter() -> None:
+                try:
+                    self.model.state.toolbar.pressure_device.port.set(device_name)
+                except Exception:
+                    pass
+
+            self._dispatch_to_ui(setter)
+
+        def status_callback(event: str, info: dict) -> None:
+            port_name = info.get("port") or (requested if requested else "auto")
+            # Reduce chatter for repeated states.
+            if event == last_status["event"] and event not in ("error", "stale", "healthy"):
+                return
+            last_status["event"] = event
+
+            if event == "connecting":
+                self._notify_status_async(f"Connecting to Arduino on {port_name}...", log=False)
+            elif event == "open":
+                self._notify_status_async(f"Serial port {port_name} opened.", log=False)
+                actual_port = info.get("port")
+                if actual_port:
+                    update_port_variable(actual_port)
+            elif event == "syncing":
+                self._notify_status_async(
+                    f"Waiting for Arduino telemetry ({port_name})...", log=False
+                )
+            elif event == "healthy":
+                hz = info.get("rx_hz")
+                if hz:
+                    self._notify_status_async(
+                        f"Arduino telemetry active ({hz:.1f} Hz).",
+                        log=False,
                     )
-            self._set_device(NullPressureDevice(), "none")
-            return
+                else:
+                    self._notify_status_async("Arduino telemetry active.", log=False)
+            elif event == "stale":
+                age = info.get("age")
+                if age:
+                    self._notify_status_async(
+                        f"Arduino telemetry stale ({age:.1f}s gap).",
+                        log=False,
+                    )
+                else:
+                    self._notify_status_async("Arduino telemetry stale.", log=False)
+            elif event == "error":
+                message = info.get("message") or "Unknown error"
+                self._notify_status_async(
+                    f"Arduino error on {port_name}: {message}",
+                    persist=True,
+                )
+            elif event == "closed":
+                self._notify_status_async(f"Arduino connection closed ({port_name}).", log=False)
 
-        device = ArduinoPressureDevice(arduino)
-        self._set_device(device, "arduino", arduino=arduino)
+        worker = ArduinoSerialWorker(
+            port=None if auto_detect else requested,
+            baud=baud,
+            monitor=monitor,
+            line_callback=device.handle_line,
+            status_callback=status_callback,
+        )
+        device.bind_worker(worker)
+        self._set_device(device, "arduino", worker=worker, monitor=monitor)
+
+        if not discovered and not auto_detect:
+            self._notify_status_async(
+                f"Serial port {requested} not detected. The worker will keep retrying.",
+                persist=True,
+            )
+
         if start_immediately:
             try:
                 device.start()
             except Exception as exc:
+                self._notify_status_async(
+                    f"Failed to start Arduino telemetry: {self._summarise_exception(exc)}",
+                    persist=True,
+                )
                 print("Failed to start Arduino pressure device:", exc)
 
     def _setup_nidaq_device(self, settings) -> PressureDevice:
@@ -289,13 +505,16 @@ class PressureController:
     def adjust_pressure(self, pressure_value_mmHg: float, update_table: bool = True) -> None:
         value = max(0.0, min(200.0, float(pressure_value_mmHg)))
 
+        self.set_pressure = value
         pressure_protocol_settings = self.model.state.toolbar.pressure_protocol
-        pressure_protocol_settings.set_pressure.set(value)
+        self._set_var_safe(pressure_protocol_settings.set_pressure, f"{value:.2f}")
 
-        try:
-            self._device_ctx.device.set_pressure(value)
-        except Exception as exc:
-            print("set_pressure failed:", exc)
+        handled = notify_setpoint(value, source="PressureController")
+        if not handled:
+            try:
+                self._device_ctx.device.set_pressure(value)
+            except Exception as exc:
+                print("set_pressure failed:", exc)
 
         if update_table:
             try:
@@ -321,7 +540,7 @@ class PressureController:
             pass
 
         if sp is not None:
-            tb.pressure_protocol.set_pressure.set(round(sp, 2))
+            self._set_var_safe(tb.pressure_protocol.set_pressure, f"{round(float(sp), 2):.2f}")
 
     def get_latest(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         return self._latest
@@ -329,6 +548,10 @@ class PressureController:
     def active_device_type(self) -> str:
         """Return the lowercase name of the currently active pressure device."""
         return str(self._device_ctx.type_name or "").lower()
+
+    def link_monitor(self) -> Optional[LinkMonitor]:
+        """Expose the Arduino link monitor (if available) for UI badges."""
+        return self._device_ctx.monitor
 
     # ------------------------------------------------------------------
     # Protocol handling (largely retained from previous implementation)
@@ -373,14 +596,21 @@ class PressureController:
         self.last_update_time = current_time
 
     def initialize_pressure_protocol(self, settings) -> None:
-        self.start_pressure = settings.pressure_start.get()
-        self.stop_pressure = settings.pressure_stop.get()
-        self.pressure_interval = settings.pressure_intvl.get()
-        self.pressure_time_interval = settings.time_intvl.get()
+        self.start_pressure = self._var_to_float(settings.pressure_start, 0.0)
+        self.stop_pressure = self._var_to_float(settings.pressure_stop, self.start_pressure)
+        interval_value = self._var_to_float(settings.pressure_intvl, 0.0)
+        self.pressure_interval = abs(interval_value)
+        self.pressure_time_interval = self._var_to_float(settings.time_intvl, 0.0)
         self.pressure_start_time = time.time()
         self.next_pressure_update_time = self.pressure_time_interval
         self.multiplier = 1
         self.protocol_completed = False
+        if self.stop_pressure > self.start_pressure:
+            self._direction = 1
+        elif self.stop_pressure < self.start_pressure:
+            self._direction = -1
+        else:
+            self._direction = 0
 
         self.set_pressure = self.start_pressure
         self.adjust_pressure(self.set_pressure)
@@ -389,30 +619,59 @@ class PressureController:
         self.stop_protocol_on_completion = True
         self.completed = False
 
-        if self.set_pressure < self.stop_pressure:
-            self.set_pressure += self.pressure_interval
-            self.adjust_pressure(self.set_pressure)
-            self.multiplier += 1
+        interval = self.pressure_interval or 0.0
+        if self._direction == 0 or interval <= 0:
+            self.completed = True
         else:
+            step = interval * self._direction
+            next_pressure = self.set_pressure + step
+            if self._direction > 0:
+                if next_pressure >= self.stop_pressure:
+                    if self.set_pressure != self.stop_pressure:
+                        self.set_pressure = self.stop_pressure
+                        self.adjust_pressure(self.set_pressure)
+                    self.completed = True
+                else:
+                    self.set_pressure = next_pressure
+                    self.adjust_pressure(self.set_pressure)
+                    self.multiplier += 1
+            else:
+                if next_pressure <= self.stop_pressure:
+                    if self.set_pressure != self.stop_pressure:
+                        self.set_pressure = self.stop_pressure
+                        self.adjust_pressure(self.set_pressure)
+                    self.completed = True
+                else:
+                    self.set_pressure = next_pressure
+                    self.adjust_pressure(self.set_pressure)
+                    self.multiplier += 1
+
+        if self.completed:
+            self.protocol_completed = True
             if not self.model.state.toolbar.pressure_protocol.hold_pressure.get():
                 self.set_pressure = self.start_pressure
                 self.adjust_pressure(self.set_pressure)
             self.multiplier = 1
-            self.completed = True
-            self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.set(0)
+            self._set_var_safe(self.model.state.toolbar.pressure_protocol.pressure_protocol_flag, 0)
             self.reset_protocol()
 
-        if self.completed:
             self.end_protocol()
 
     def reset_protocol(self) -> None:
         settings = self.model.state.toolbar.pressure_protocol
-        self.start_pressure = settings.pressure_start.get()
-        self.stop_pressure = settings.pressure_stop.get()
-        self.pressure_interval = settings.pressure_intvl.get()
-        self.pressure_time_interval = settings.time_intvl.get()
-        self.set_pressure = settings.set_pressure.get()
+        self.start_pressure = self._var_to_float(settings.pressure_start, 0.0)
+        self.stop_pressure = self._var_to_float(settings.pressure_stop, self.start_pressure)
+        interval_value = self._var_to_float(settings.pressure_intvl, 0.0)
+        self.pressure_interval = abs(interval_value)
+        self.pressure_time_interval = self._var_to_float(settings.time_intvl, 0.0)
+        self.set_pressure = self._var_to_float(settings.set_pressure, self.start_pressure)
         self.pressure_start_time = None
         self.multiplier = 1
         self.next_pressure_update_time = 0
         self.protocol_completed = False
+        if self.stop_pressure > self.start_pressure:
+            self._direction = 1
+        elif self.stop_pressure < self.start_pressure:
+            self._direction = -1
+        else:
+            self._direction = 0

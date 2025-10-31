@@ -70,7 +70,7 @@ from concurrent.futures import Future, ProcessPoolExecutor
 import csv
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from enum import IntEnum, auto
+from enum import Enum, IntEnum, auto
 from functools import partial
 import math
 from math import hypot
@@ -81,7 +81,7 @@ import sys
 import threading
 import time
 import traceback
-from typing import Callable, Dict, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Type
 import webbrowser
 # Suppress pygame welcome message
 sys.stdout = open(os.devnull, 'w')
@@ -101,7 +101,7 @@ from matplotlib.path import Path as MplPath
 import skimage
 import tifffile as tf
 import tkinter as tk
-from tkinter import filedialog, scrolledtext, IntVar, StringVar, DoubleVar, BooleanVar, Scale
+from tkinter import filedialog, scrolledtext, IntVar, StringVar, DoubleVar, BooleanVar, Scale, TclError
 import tkinter.messagebox as tmb
 import tkinter.ttk as ttk
 from tkinter import font
@@ -114,6 +114,11 @@ from utilities.VT_NavBar import CustomVTToolbar
 from utilities.VasoTrackerSplashScreen import VasoTrackerSplashScreen
 from utilities.ToolTip import ToolTip
 from utilities.VT_Pressure import PressureController, is_pydaqmx_available
+
+try:
+    from .setpoint_bus import add_setpoint_listener, remove_setpoint_listener, request_setpoint_refresh
+except ImportError:
+    from setpoint_bus import add_setpoint_listener, remove_setpoint_listener, request_setpoint_refresh
 from cameras import Camera, CameraBase
 from config import AcquisitionSettings, Config, GraphAxisSettings
 import customtkinter as ctk
@@ -127,7 +132,8 @@ try:
 except:
     micromanager_available = False
 
-print("Is PYDAQMX = ", is_pydaqmx_available())
+# Cache optional dependency availability without printing at startup.
+_PYDAQMX_AVAILABLE = is_pydaqmx_available()
 
 # Constants
 SYS32_PATH = "C:/WINDOWS/SYSTEM32/DRIVERs/"
@@ -152,23 +158,225 @@ VasoTracker_Blue = '#203C57'
 frame_label_color = VasoTracker_Blue
 frame_label_height = 25
 entry_disabled_color="#BDC3C7"
+entry_active_color="#FFFFFF"
+entry_text_color="#0B2533"
+entry_placeholder_color="#6B7C8F"
+button_enabled_color="white"
 
 # The following is so that the required resources are included in the PyInstaller build.
 # Utility functions
-def get_resource_path(relative_path):
-    """Get the path to a resource, whether it's bundled with PyInstaller or not."""
-    base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
-    return os.path.join(base_path, relative_path)
+_MODULE_ROOT = Path(__file__).resolve().parent
+
+
+def get_resource_path(relative_path: str) -> str:
+    """
+    Return an absolute path to a bundled resource.
+
+    When running from a PyInstaller bundle `_MEIPASS` points at the unpacked
+    temp directory.  Otherwise fall back to the package folder so resources are
+    located correctly even if the working directory is elsewhere.
+    """
+    base_path = getattr(sys, "_MEIPASS", _MODULE_ROOT)
+    candidate_path = os.path.join(base_path, relative_path)
+    if os.path.exists(candidate_path):
+        return candidate_path
+
+    fallback_path = os.path.join(os.path.abspath("."), relative_path)
+    return fallback_path if os.path.exists(fallback_path) else candidate_path
 
 
 
 # Resource paths
-images_folder = get_resource_path("images\\")
-sample_data_path = get_resource_path("SampleData\\")
+images_folder = get_resource_path(os.path.join("images"))
+sample_data_path = get_resource_path(os.path.join("SampleData"))
 gui_json_path = get_resource_path("VasoTrackerblue.json")
 
 # TODOs and Future Improvements
 # TODO:
+
+
+def _values_close(a, b, tol: Optional[float]) -> bool:
+    """Return True if ``a`` and ``b`` are within ``tol`` (or exactly equal when ``tol`` is None)."""
+    if tol is None:
+        return a == b
+    try:
+        fa = float(a)
+        fb = float(b)
+    except (TypeError, ValueError):
+        return a == b
+    if math.isnan(fa) or math.isnan(fb):
+        return math.isnan(fa) and math.isnan(fb)
+    return abs(fa - fb) <= tol
+
+
+class SmartVarDecision(Enum):
+    SKIP = auto()
+    EMIT = auto()
+    DEFER = auto()
+
+
+class SmartVarLimiter:
+    """Throttle Tk variable updates so we do not flood the event loop."""
+
+    __slots__ = ("_last_value", "_next_allowed", "_pending_value")
+
+    def __init__(self) -> None:
+        self._last_value = None
+        self._next_allowed = 0.0
+        self._pending_value = None
+
+    def evaluate(self, value, *, tol: Optional[float], min_interval: float, now: float) -> SmartVarDecision:
+        last = self._last_value
+        if last is None:
+            self._last_value = value
+            self._next_allowed = now + min_interval
+            self._pending_value = None
+            return SmartVarDecision.EMIT
+
+        unchanged = _values_close(value, last, tol)
+        if unchanged:
+            self._pending_value = None
+            if now >= self._next_allowed:
+                self._next_allowed = now + min_interval
+            return SmartVarDecision.SKIP
+
+        if now >= self._next_allowed:
+            self._pending_value = None
+            self._last_value = value
+            self._next_allowed = now + min_interval
+            return SmartVarDecision.EMIT
+
+        self._pending_value = value
+        return SmartVarDecision.DEFER
+
+    def flush(self, *, min_interval: float, now: float):
+        if self._pending_value is None:
+            return None
+        value = self._pending_value
+        self._pending_value = None
+        self._last_value = value
+        self._next_allowed = now + min_interval
+        return value
+
+    @property
+    def next_allowed(self) -> float:
+        return self._next_allowed
+
+
+class UiThrottle:
+    """Adapt GUI refresh cadence while menus are open to keep them responsive."""
+
+    def __init__(self, *, fast_ms: int = 20, slow_ms: int = 120, quiet_after: float = 0.25):
+        self.fast_ms = max(1, int(fast_ms))
+        self.slow_ms = max(self.fast_ms, int(slow_ms))
+        self.quiet_after = quiet_after
+        self.menu_mode = False
+        self._last_menu_event = 0.0
+
+    def enter_menu_mode(self) -> None:
+        self.menu_mode = True
+        self._last_menu_event = time.perf_counter()
+
+    def note_menu_activity(self) -> None:
+        self._last_menu_event = time.perf_counter()
+
+    def maybe_leave_menu_mode(self) -> None:
+        if not self.menu_mode:
+            return
+        if (time.perf_counter() - self._last_menu_event) >= self.quiet_after:
+            self.menu_mode = False
+
+    def current_period(self) -> int:
+        return self.slow_ms if self.menu_mode else self.fast_ms
+
+    def fast_period(self) -> int:
+        return self.fast_ms
+
+    def is_slowed(self) -> bool:
+        return self.menu_mode
+
+
+def wire_menu_throttle(root: tk.Misc, menubar: tk.Menu, throttle: UiThrottle) -> None:
+    """Slow down background refresh while native menus are posted."""
+
+    def _on_post():
+        throttle.enter_menu_mode()
+
+    def _on_select(_event):
+        throttle.note_menu_activity()
+
+    root.bind_all("<<MenuSelect>>", _on_select, add="+")
+    try:
+        last_index = menubar.index("end")
+    except tk.TclError:
+        last_index = None
+    if last_index is None:
+        return
+    for idx in range(last_index + 1):
+        try:
+            submenu_name = menubar.entrycget(idx, "menu")
+        except tk.TclError:
+            continue
+        if not submenu_name:
+            continue
+        try:
+            submenu = menubar.nametowidget(submenu_name)
+        except KeyError:
+            continue
+        submenu.configure(postcommand=_on_post)
+
+
+class UiHeartbeat:
+    """Single `.after` loop that coalesces lightweight UI tasks."""
+
+    def __init__(self, root: tk.Misc, throttle: UiThrottle, tasks: Iterable[Callable[[], Optional[bool]]]):
+        self._root = root
+        self._throttle = throttle
+        self._tasks = list(tasks)
+        self._job = None
+        self._fast_override_ms = max(5, self._throttle.fast_period() // 2)
+
+    def add_task(self, task: Callable[[], Optional[bool]]) -> None:
+        self._tasks.append(task)
+
+    def start(self) -> None:
+        if self._job is None:
+            self._schedule(self._throttle.current_period())
+
+    def stop(self) -> None:
+        if self._job is not None:
+            try:
+                self._root.after_cancel(self._job)
+            except Exception:
+                pass
+            self._job = None
+
+    def request_fast_tick(self) -> None:
+        if self._job is None:
+            return
+        self._root.after_cancel(self._job)
+        self._schedule(self._fast_override_ms)
+
+    def _schedule(self, delay_ms: int) -> None:
+        self._job = self._root.after(max(1, int(delay_ms)), self._run_once)
+
+    def _run_once(self) -> None:
+        self._job = None
+        request_fast = False
+        for task in self._tasks:
+            try:
+                result = task()
+            except Exception:
+                traceback.print_exc()
+                continue
+            if result:
+                request_fast = True
+        self._throttle.maybe_leave_menu_mode()
+        if request_fast and not self._throttle.is_slowed():
+            delay = min(self._throttle.current_period(), self._fast_override_ms)
+        else:
+            delay = self._throttle.current_period()
+        self._schedule(delay)
 
 
 @dataclass
@@ -257,7 +465,8 @@ class DataAcqPaneState:
     inner_diam: DoubleVar = field(default_factory=DoubleVar)
     diam_percent: DoubleVar = field(default_factory=DoubleVar)
     caliper_length: DoubleVar = field(default_factory=DoubleVar)
-    countdown: IntVar = field(default_factory=IntVar)
+    countdown: StringVar = field(default_factory=lambda: StringVar(value="0:00:00"))
+    device_set_pressure: StringVar = field(default_factory=lambda: StringVar(value="0.0"))
 
 
 
@@ -283,16 +492,18 @@ class PressureDeviceSettingsState:
 
 @dataclass
 class PressureProtocolSettingsState:
-    pressure_start: IntVar = field(default_factory=IntVar)
-    pressure_stop: IntVar = field(default_factory=IntVar)
+    pressure_start: StringVar = field(default_factory=lambda: StringVar(value="0"))
+    pressure_stop: StringVar = field(default_factory=lambda: StringVar(value="0"))
     pressure_protocol_flag: IntVar = field(default_factory=IntVar)
-    pressure_intvl: IntVar = field(default_factory=IntVar)
-    time_intvl: IntVar = field(default_factory=IntVar)
+    pressure_intvl: StringVar = field(default_factory=lambda: StringVar(value="0"))
+    time_intvl: StringVar = field(default_factory=lambda: StringVar(value="0"))
     #countdown: IntVar = field(default_factory=IntVar)
     protocol_start_time: IntVar = field(default_factory=IntVar)
-    set_pressure: IntVar = field(default_factory=IntVar)
+    set_pressure: StringVar = field(default_factory=lambda: StringVar(value="0"))
     pressure_increment: IntVar = field(default_factory=IntVar)
     hold_pressure: BooleanVar = field(default_factory=BooleanVar)
+    device_set_pressure: StringVar = field(default_factory=lambda: StringVar(value="0.0"))
+    device_set_source: StringVar = field(default_factory=lambda: StringVar(value="init"))
 
 @dataclass
 class StartStopState:
@@ -791,6 +1002,38 @@ def compute_diameters_and_rasterise(
     )
 
 
+def safe_var_float(var, default=float("nan")) -> float:
+    """Convert a Tk variable to float, tolerating empty or invalid values."""
+    if var is None:
+        return default
+    try:
+        value = var.get()
+    except TclError:
+        return default
+    except Exception:
+        return default
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "":
+            return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def safe_var_set(var, value) -> None:
+    """Update a Tk variable, ignoring stale callbacks from destroyed widgets."""
+    if var is None:
+        return
+    try:
+        var.set(value)
+    except TclError:
+        pass
+    except Exception:
+        pass
+
+
 @dataclass
 class FutureAndCallbackFlag:
     future: Future
@@ -798,10 +1041,9 @@ class FutureAndCallbackFlag:
 
 
 class Model:
-    def __init__(self, mmc: CMMCorePlus, set_timeout):
+    def __init__(self, mmc: CMMCorePlus):
         self.pressure_controller = None
         self.state = VtState()
-        self.set_timeout = set_timeout
         self.run_acq_thread = True
         self.acquiring = False
         self.file_analysed = False
@@ -828,6 +1070,11 @@ class Model:
         self.recorded_csv_writer = None
         self.recorded_csv_path = None
         self.trace_fieldnames = None
+        self._smart_var_limiters: Dict[str, SmartVarLimiter] = {}
+        self._ui_scheduler: Optional[Callable[[int, Callable[[], None]], Any]] = None
+        self._ui_scheduler_cancel: Optional[Callable[[Any], None]] = None
+        self._deferred_jobs: Dict[str, Any] = {}
+        self._pending_updates: Dict[str, Tuple[Any, float]] = {}
 
 
         try:
@@ -920,6 +1167,26 @@ class Model:
         self.table_writer.writerow(self.state.table.headers())
         self.table_file.flush()
 
+    def _resolve_set_pressure(self) -> float:
+        """Return the most recent commanded pressure setpoint."""
+        controller = self.pressure_controller
+        if controller is not None:
+            try:
+                value = float(controller.set_pressure)
+                if not math.isnan(value):
+                    return value
+            except Exception:
+                pass
+            try:
+                _, _, latest_sp = controller.get_latest()
+                if latest_sp is not None:
+                    value = float(latest_sp)
+                    if not math.isnan(value):
+                        return value
+            except Exception:
+                pass
+        return safe_var_float(self.state.toolbar.pressure_protocol.set_pressure, default=np.nan)
+
         tb = self.state.toolbar
         tb.source.path.set(self.output_dir)
         tb.source.filename.set(self.output_filename)
@@ -937,7 +1204,7 @@ class Model:
 
         tb.caliper_roi.roi_flag.set("ROI")
 
-        tb.pressure_protocol.hold_pressure.set(True)
+        safe_var_set(tb.pressure_protocol.hold_pressure, True)
 
         tb.start_stop.record.set(True)
 
@@ -960,6 +1227,84 @@ class Model:
         else:
             self.executor = ProcessPoolExecutor(max_workers=num_threads)
         self.futures_to_resolve = deque()
+
+    def _smart_var_set(
+        self,
+        key: str,
+        var,
+        value,
+        *,
+        tol: Optional[float],
+        min_interval: float,
+        now: Optional[float] = None,
+    ) -> bool:
+        """Throttle repetitive Tk variable updates."""
+        limiter = self._smart_var_limiters.get(key)
+        if limiter is None:
+            limiter = SmartVarLimiter()
+            self._smart_var_limiters[key] = limiter
+        if now is None:
+            now = time.perf_counter()
+        decision = limiter.evaluate(value, tol=tol, min_interval=min_interval, now=now)
+        if decision is SmartVarDecision.EMIT:
+            existing_job = self._deferred_jobs.pop(key, None)
+            if existing_job is not None and self._ui_scheduler_cancel is not None:
+                try:
+                    self._ui_scheduler_cancel(existing_job)
+                except Exception:
+                    pass
+            self._pending_updates.pop(key, None)
+            safe_var_set(var, value)
+            return True
+        if decision is SmartVarDecision.SKIP:
+            existing_job = self._deferred_jobs.pop(key, None)
+            if existing_job is not None and self._ui_scheduler_cancel is not None:
+                try:
+                    self._ui_scheduler_cancel(existing_job)
+                except Exception:
+                    pass
+            self._pending_updates.pop(key, None)
+            return False
+        # Defer: queue update after quiet period if possible
+        if self._ui_scheduler is None:
+            flushed = limiter.flush(min_interval=min_interval, now=now)
+            if flushed is not None:
+                safe_var_set(var, flushed)
+                return True
+            return False
+        delay_ms = max(1, int(max(0.0, limiter.next_allowed - now) * 1000))
+        existing_job = self._deferred_jobs.get(key)
+        if existing_job is not None and self._ui_scheduler_cancel is not None:
+            try:
+                self._ui_scheduler_cancel(existing_job)
+            except Exception:
+                pass
+        self._pending_updates[key] = (var, min_interval)
+        callback = lambda key=key: self._flush_smart_var(key)
+        job = self._ui_scheduler(delay_ms, callback)
+        self._deferred_jobs[key] = job
+        return True
+
+    def set_ui_scheduler(
+        self,
+        after_call: Callable[[int, Callable[[], None]], Any],
+        cancel_call: Callable[[Any], None],
+    ) -> None:
+        self._ui_scheduler = after_call
+        self._ui_scheduler_cancel = cancel_call
+
+    def _flush_smart_var(self, key: str) -> None:
+        self._deferred_jobs.pop(key, None)
+        pending = self._pending_updates.pop(key, None)
+        limiter = self._smart_var_limiters.get(key)
+        if pending is None or limiter is None:
+            return
+        var, min_interval = pending
+        now = time.perf_counter()
+        value = limiter.flush(min_interval=min_interval, now=now)
+        if value is None:
+            return
+        safe_var_set(var, value)
 
     def _reset_save_gate(self, t_now: float, interval: float) -> None:
         """Prime the save gate so it fires at most once per recording interval."""
@@ -1193,14 +1538,14 @@ class Model:
 
         tb.acq.scale.trace_add("write", update_scale)
 
-    def process_images(self):
+    def process_images(self) -> bool:
         got_im = False
         while not self.queue.empty():
             im = self.queue.get(block=False)
             got_im = True
 
         if not got_im:
-            return
+            return False
 
         tb = self.state.toolbar
         current_time = time.perf_counter()
@@ -1251,6 +1596,7 @@ class Model:
 
             
         self.frame_count += 1
+        return got_im
 
     def resolve_next_pending_future(self):
         def resolve_future(f: Future):
@@ -1392,7 +1738,7 @@ class Model:
 
             set_pressure_store = _to_float_or_nan(latest_sp)
             if math.isnan(set_pressure_store):
-                set_pressure_store = _to_float_or_nan(tb.pressure_protocol.set_pressure.get())
+                set_pressure_store = self._resolve_set_pressure()
 
             self.state.measure.append(
                 t=self.time_elapsed,
@@ -1442,10 +1788,7 @@ class Model:
                         avg_pressure_val = float("nan")
                 set_pressure_val = _to_float_or_nan(latest_sp)
                 if math.isnan(set_pressure_val):
-                    try:
-                        set_pressure_val = float(tb.pressure_protocol.set_pressure.get())
-                    except Exception:
-                        set_pressure_val = float("nan")
+                    set_pressure_val = self._resolve_set_pressure()
                 try:
                     caliper_length_val = float(tb.data_acq.caliper_length.get())
                 except Exception:
@@ -1513,6 +1856,7 @@ class Model:
             graph.markers.y = marker_ordinates
 
             if have_autocaliper or have_multi_roi:
+                tick_now_lines = time.perf_counter()
                 filter_diams=tb.analysis.filter.get()
                 def compute_masked_diams(diam_list, good_list):
                     masked_diams = []
@@ -1576,8 +1920,22 @@ class Model:
                     measure.inner_diam_roi[i].append(line_id_value)
 
                     # This is used to update the variable in the entry box the show/ hides traces.
-                    tb.plotting.outer_diam_values[i].set(line_od_value)
-                    tb.plotting.inner_diam_values[i].set(line_id_value)
+                    self._smart_var_set(
+                        f"plot_od_{i}",
+                        tb.plotting.outer_diam_values[i],
+                        line_od_value,
+                        tol=0.1,
+                        min_interval=0.2,
+                        now=tick_now_lines,
+                    )
+                    self._smart_var_set(
+                        f"plot_id_{i}",
+                        tb.plotting.inner_diam_values[i],
+                        line_id_value,
+                        tol=0.1,
+                        min_interval=0.2,
+                        now=tick_now_lines,
+                    )
                     
 
 
@@ -1602,18 +1960,65 @@ class Model:
                 delta = max(current_time - self.prev_update, 1e-9)
                 acq_rate = 1.0 / delta
             self.prev_update = current_time
-            tb.acq.acq_rate.set(np.round(acq_rate, 2))
-            tb.data_acq.time.set(np.round(self.time_elapsed, 1))
+            tick_now_metrics = time.perf_counter()
+            acq_rate_value = float(np.round(acq_rate, 2))
+            self._smart_var_set(
+                "acq_rate",
+                tb.acq.acq_rate,
+                acq_rate_value,
+                tol=0.05,
+                min_interval=0.12,
+                now=tick_now_metrics,
+            )
+            elapsed_value = float(np.round(self.time_elapsed, 1))
+            self._smart_var_set(
+                "time_elapsed",
+                tb.data_acq.time,
+                elapsed_value,
+                tol=0.05,
+                min_interval=0.12,
+                now=tick_now_metrics,
+            )
             formatted_time = time.strftime(
                 "%H:%M:%S", time.gmtime(max(0.0, self.time_elapsed))
             )
-            tb.data_acq.time_string.set(formatted_time)
-            tb.data_acq.outer_diam.set(np.round(diams.avg_outer_diam, 1))
-            tb.data_acq.inner_diam.set(np.round(diams.avg_inner_diam, 1))
+            self._smart_var_set(
+                "time_string",
+                tb.data_acq.time_string,
+                formatted_time,
+                tol=None,
+                min_interval=0.5,
+                now=tick_now_metrics,
+            )
+            outer_avg = float(np.round(diams.avg_outer_diam, 1))
+            inner_avg = float(np.round(diams.avg_inner_diam, 1))
+            self._smart_var_set(
+                "avg_outer_diam",
+                tb.data_acq.outer_diam,
+                outer_avg,
+                tol=0.05,
+                min_interval=0.12,
+                now=tick_now_metrics,
+            )
+            self._smart_var_set(
+                "avg_inner_diam",
+                tb.data_acq.inner_diam,
+                inner_avg,
+                tol=0.05,
+                min_interval=0.12,
+                now=tick_now_metrics,
+            )
             ref_diam = self.state.table.ref_diam.get()
             if not np.isnan(ref_diam) and ref_diam != 0.0:
                 outer_percentage = np.round((diams.avg_outer_diam / ref_diam) * 100, 2)
-                tb.data_acq.diam_percent.set(outer_percentage)
+                self._smart_var_set(
+                    "outer_percentage",
+                    tb.data_acq.diam_percent,
+                    float(outer_percentage),
+                    tol=0.1,
+                    min_interval=0.2,
+                    now=tick_now_metrics,
+                )
 
 
 
@@ -1676,39 +2081,34 @@ class Model:
             description = metadata_json
             self.tiff_writer2.write(image, description=description)
 
-    def process_updates(self):
-        tb = self.state.toolbar
+    def process_updates(self) -> bool:
+        if not self.run_acq_thread:
+            return False
+
+        did_work = False
         try:
-            self.process_images()
-        except:
+            if self.process_images():
+                did_work = True
+        except Exception:
             traceback.print_exc()
 
-        # need to update the timer here
         if (
             self.pressure_controller is not None
             and self.state.toolbar.pressure_protocol.pressure_protocol_flag.get() == 1
         ):
-            #update the timer here
-            # new if based on timer to set pressure
-             #Timenow + interval = next pressure
             try:
                 self.pressure_controller.update_intvl()
-            except:
+            except Exception:
                 traceback.print_exc()
 
-        else:
-            pass
-
-        if getattr(self, "pressure_controller", None):
+        controller = getattr(self, "pressure_controller", None)
+        if controller is not None:
             try:
-                self.pressure_controller.poll_latest()
+                controller.poll_latest()
             except Exception:
                 pass
 
-        if self.run_acq_thread:
-            # NOTE(cmo): This is only set False when we're exiting, at which
-            # point stop handling future events
-            self.set_timeout(10, self.process_updates)
+        return did_work
 
     ##### WORKING HERE
 
@@ -2112,12 +2512,12 @@ class Model:
         diams = self.state.diameters
         table = self.state.table
         label = table.label.get()
-        ref_diam = table.ref_diam.get()
-        percentage = (diams.avg_outer_diam / ref_diam) * 100.0
-        percentage_as_str = str(np.round(percentage, 2))
-        if np.isnan(ref_diam) or ref_diam == 0.0:
-            percentage = np.nan
-            percentage_as_str = "-"
+        ref_diam = safe_var_float(table.ref_diam, default=np.nan)
+        percentage = np.nan
+        percentage_as_str = "-"
+        if not np.isnan(ref_diam) and ref_diam != 0.0:
+            percentage = (diams.avg_outer_diam / ref_diam) * 100.0
+            percentage_as_str = str(np.round(percentage, 2))
         tb = self.state.toolbar
         caliper_length = tb.data_acq.caliper_length.get()
 
@@ -2185,6 +2585,15 @@ def make_entry_factory(self):
     def make_entry(EntryType: Type[tk.Widget], row, column=1, sticky="",padx=0, pady=2, disabled=False, **kwargs):
         # Set default width to 8 unless specified in kwargs
         kwargs.setdefault('width', 50)
+        try:
+            is_ctk_entry = issubclass(EntryType, ctk.CTkEntry)
+        except Exception:
+            is_ctk_entry = False
+        if is_ctk_entry:
+            kwargs.setdefault("text_color", entry_text_color)
+            kwargs.setdefault("placeholder_text_color", entry_placeholder_color)
+            if not disabled and "fg_color" not in kwargs:
+                kwargs["fg_color"] = entry_active_color
         # NOTE(cmo): The need for this is due to tkinter being silly and
         # requiring *args be used for the options in an OptionMenu
         if "args" in kwargs:
@@ -2915,6 +3324,12 @@ class DataAcquisitionPane(ToolbarPane):
         super().__init__(parent, height=400, width=400)
         self.model_vars = model_vars
         sv = model_vars.toolbar.data_acq
+        protocol_state = model_vars.toolbar.pressure_protocol
+        sv.device_set_pressure.set(protocol_state.device_set_pressure.get())
+        self._device_set_pressure_trace = protocol_state.device_set_pressure.trace_add(
+            "write", lambda *_: sv.device_set_pressure.set(protocol_state.device_set_pressure.get())
+        )
+        self.bind("<Destroy>", self._on_destroy, add="+")
 
         self.pack(side=tk.LEFT, anchor=tk.N, padx=5, pady=5, fill=tk.Y)
         self.frame_label = ctk.CTkLabel(self, text="Data Acquisition", font=(default_font, 16, 'bold'), fg_color=frame_label_color, height=frame_label_height, text_color='white').grid(row=0, column=0, columnspan=4,padx=1,pady=1, sticky="nsew")
@@ -2932,7 +3347,7 @@ class DataAcquisitionPane(ToolbarPane):
         padx = (0,30)
 
         # Configuring the grid
-        for col in range(3):
+        for col in range(4):
             self.grid_columnconfigure(col, weight=1)
 
         # Labels for OD, ID, and Pressure
@@ -2970,6 +3385,38 @@ class DataAcquisitionPane(ToolbarPane):
         ctk.CTkLabel(self, text="Time (hh:mm:ss):", anchor="center", font=(default_font, default_font_size)).grid(row=3, column=3, padx=padx, pady=0, sticky=tk.EW)
         self.time_entry = ctk.CTkEntry(self, textvariable=sv.time_string, font=(default_font, entry_font_size, "bold"), justify=justify, width=entry_width, fg_color=entry_fg_color, text_color=color_gray,  state=tk.DISABLED)
         self.time_entry.grid(row=4, column=3,padx=padx, pady=5)
+
+        ctk.CTkLabel(
+            self,
+            text="Selected pressure (mmHg):",
+            anchor="center",
+            font=(default_font, default_font_size),
+        ).grid(row=5, column=0, columnspan=4, padx=(20, 30), pady=(10, 0), sticky=tk.EW)
+        self.device_set_pressure_entry = ctk.CTkEntry(
+            self,
+            textvariable=sv.device_set_pressure,
+            font=(default_font, entry_font_size, "bold"),
+            justify=justify,
+            width=entry_width,
+            fg_color=entry_fg_color,
+            text_color=color_vt,
+            state=tk.DISABLED,
+        )
+        self.device_set_pressure_entry.grid(row=6, column=0, columnspan=4, padx=(20, 30), pady=5, sticky=tk.EW)
+
+    def _on_destroy(self, event) -> None:
+        if event.widget is not self:
+            return
+        trace = getattr(self, "_device_set_pressure_trace", None)
+        if not trace:
+            return
+        try:
+            self.model_vars.toolbar.pressure_protocol.device_set_pressure.trace_remove(
+                "write", trace
+            )
+        except tk.TclError:
+            pass
+        self._device_set_pressure_trace = None
 
 
 
@@ -3038,6 +3485,7 @@ class PressureDevicePane(ToolbarPane):
 
     def __init__(self, parent, model_vars: VtState):
         super().__init__(parent, height=200, width=200)
+        self.grid_columnconfigure(2, weight=0)
         self.parent = parent
         self.model_vars = model_vars
         settings = model_vars.toolbar.pressure_device
@@ -3080,6 +3528,13 @@ class PressureDevicePane(ToolbarPane):
             row=2,
             column=1,
         )
+        self.detect_ports_button = ctk.CTkButton(
+            self,
+            text="Detect",
+            width=80,
+            command=self._on_detect_ports,
+        )
+        self.detect_ports_button.grid(row=2, column=2, sticky=tk.W, padx=(6, 2), pady=2)
 
         ctk.CTkLabel(
             self, text="Baud", font=(default_font, default_font_size)
@@ -3130,14 +3585,30 @@ class PressureDevicePane(ToolbarPane):
             column=1,
         )
 
+        pydaq_text = "Yes" if _PYDAQMX_AVAILABLE else "No"
         self.pydaqmx_status_label = ctk.CTkLabel(
             self,
-            text=f"PyDAQmx available: {is_pydaqmx_available()}",
+            text=f"PyDAQmx available: {pydaq_text}",
             font=(default_font, default_font_size - 1),
         )
         self.pydaqmx_status_label.grid(
             row=7, column=0, columnspan=2, padx=2, pady=(8, 2)
         )
+        self.port_hint_label = ctk.CTkLabel(
+            self,
+            text="",
+            font=(default_font, default_font_size - 2),
+            text_color="#6c7a89",
+        )
+        self.port_hint_label.grid(
+            row=8,
+            column=0,
+            columnspan=3,
+            sticky=tk.W,
+            padx=2,
+            pady=(4, 0),
+        )
+        self._set_port_hint("Click Detect to locate connected Arduino devices.")
 
         # Tooltips
         tooltip = ToolTip(self)
@@ -3158,11 +3629,21 @@ class PressureDevicePane(ToolbarPane):
         arduino_state = tk.NORMAL if device == "arduino" else tk.DISABLED
         ni_state = tk.NORMAL if device in ("ni", "ni-daq", "nidaq") else tk.DISABLED
 
-        self.port_entry.configure(state=arduino_state)
-        self.baud_entry.configure(state=arduino_state)
-        self.ni_device_entry.configure(state=ni_state)
-        self.ni_ao_entry.configure(state=ni_state)
-        self.ni_scale_entry.configure(state=ni_state)
+        def _safe_config(widget, **kwargs):
+            try:
+                if widget is not None and int(widget.winfo_exists()):
+                    widget.configure(**kwargs)
+            except tk.TclError:
+                pass
+
+        _safe_config(self.port_entry, state=arduino_state)
+        _safe_config(self.baud_entry, state=arduino_state)
+        _safe_config(self.detect_ports_button, state=arduino_state)
+        _safe_config(self.ni_device_entry, state=ni_state)
+        _safe_config(self.ni_ao_entry, state=ni_state)
+        _safe_config(self.ni_scale_entry, state=ni_state)
+        if device != "arduino":
+            self._set_port_hint("")
 
     def _on_device_change(self, *args) -> None:
         if getattr(self, "_device_change_pending", False):
@@ -3170,6 +3651,18 @@ class PressureDevicePane(ToolbarPane):
 
         self._device_change_pending = True
         self._apply_field_states()
+
+        selected_type = self.model_vars.toolbar.pressure_device.device_type.get().strip().lower()
+        if selected_type in ("ni", "ni-daq", "nidaq") and not _PYDAQMX_AVAILABLE:
+            tmb.showinfo(
+                "NI-DAQ unavailable",
+                "niDAQmx is not installed, so NI-DAQ pressure control is disabled. "
+                "Install niDAQmx to use this option or select Arduino instead.",
+            )
+            self.model_vars.toolbar.pressure_device.device_type.set("None")
+            self._apply_field_states()
+            self._device_change_pending = False
+            return
 
         controller = self.model_vars.pressure_controller
         if controller is None:
@@ -3193,6 +3686,42 @@ class PressureDevicePane(ToolbarPane):
 
         self.after(0, apply_change)
 
+    def _on_detect_ports(self) -> None:
+        controller = self.model_vars.pressure_controller
+        if controller is None:
+            return
+
+        ports = controller.list_serial_ports()
+        if not ports:
+            controller.notify_status(
+                "No serial devices detected. Connect the Arduino and click Detect again.",
+                persist=True,
+            )
+            self._set_port_hint("Detected ports: none")
+            return
+
+        hint = ", ".join(f"{device} ({desc})" if desc else device for device, desc in ports)
+        self._set_port_hint(f"Detected ports: {hint}")
+
+        preferred = self._pick_preferred_port(ports)
+        if preferred:
+            self.model_vars.toolbar.pressure_device.port.set(preferred)
+            self._set_port_hint(f"Selected port: {preferred} • Detected ports: {hint}")
+            controller.configure_from_state(start_immediately=True)
+            controller.start()
+
+    @staticmethod
+    def _pick_preferred_port(ports: List[Tuple[str, str]]) -> Optional[str]:
+        keywords = ("vasomoto", "arduino", "usb", "serial", "cu.", "tty", "com")
+        for device, description in ports:
+            text = f"{device} {description}".lower()
+            if any(keyword in text for keyword in keywords):
+                return device
+        return ports[0][0] if ports else None
+
+    def _set_port_hint(self, text: str) -> None:
+        self.port_hint_label.configure(text=text)
+
 
 class PressureControlPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
@@ -3200,6 +3729,7 @@ class PressureControlPane(ToolbarPane):
         self.parent = parent
         self.model_vars = model_vars
         sv = model_vars.toolbar.pressure_protocol
+        self._locked = True
 
         self.pack(side=tk.LEFT, anchor=tk.N, padx=5, pady=5, fill=tk.Y)
         self.frame_label = ctk.CTkLabel(self, text="Pressure control (mmHg)", font=(default_font, 16, 'bold'), fg_color=frame_label_color, height=frame_label_height, text_color='white').grid(row=0, column=0, columnspan=4,padx=1,pady=1, sticky="nsew")
@@ -3236,31 +3766,88 @@ class PressureControlPane(ToolbarPane):
         self.set_pressure_button.grid(row=1, column=3, padx=padx, pady=(8,0))
         self.set_pressure_button.image = self.set_pressure_img  # Keep a reference
 
+        self._colour_neutral = "#B0BEC5"
+        self._colour_amber = "#f39c12"
+        self._colour_green = "#2ecc71"
+        sv.device_set_pressure.set("0.0")
+        sv.device_set_source.set("init")
+        self._device_display_var = tk.StringVar(value="Device set pressure: 0.0 mmHg")
+        self._pending_gui_event = False
+        self._last_gui_event_ts = 0.0
+        self._listener_removed = False
+        self._last_device_value: Optional[float] = None
+
+        self._recent_events = deque(maxlen=5)
+        self._debug_visible = False
+
+        self.device_set_label = None
+        self.debug_overlay = ctk.CTkLabel(
+            self,
+            text="",
+            justify=tk.LEFT,
+            font=(default_font, default_font_size - 2),
+            text_color=self._colour_neutral,
+        )
+        self.debug_overlay.grid(row=7, column=0, columnspan=4, sticky=tk.W, padx=padx, pady=(4, 0))
+        self.debug_overlay.grid_remove()
 
 
         ctk.CTkLabel(self, text="Manual control:", font=(default_font, default_font_size)).grid(row=2, column=0, columnspan=4, sticky=tk.W)
 
+        self._suppress_manual_slider = False
+        initial_setpoint = safe_var_float(sv.set_pressure, default=0.0)
+        self.manual_slider = ctk.CTkSlider(
+            self,
+            from_=0,
+            to=200,
+            number_of_steps=2000,
+            width=260,
+            command=self._on_manual_slider,
+        )
+        self.manual_slider.grid(row=3, column=0, columnspan=4, padx=padx, pady=(4, 6), sticky="ew")
+        self.manual_slider.set(initial_setpoint)
+
         # Recessed Entry
-        self.outer_diam_entry = ctk.CTkEntry(self, font=(default_font, 20), textvariable=sv.set_pressure, justify=justify, width=100, fg_color=entry_disabled_color, state=tk.DISABLED)
-        self.outer_diam_entry.grid(row=3, column=1, columnspan=2)  # Span two columns
+        self.outer_diam_entry = ctk.CTkEntry(
+            self,
+            font=(default_font, 20),
+            textvariable=sv.set_pressure,
+            justify=justify,
+            width=100,
+            fg_color=entry_disabled_color,
+            text_color=entry_text_color,
+            placeholder_text_color=entry_placeholder_color,
+            state=tk.DISABLED,
+        )
+        self.outer_diam_entry.grid(row=4, column=1, columnspan=2)  # Span two columns
 
         self.minus_img = self.resize_img(os.path.join(images_folder, 'Subtract Button Black.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
         self.minus_button = ctk.CTkButton(self, image=self.minus_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH)
-        self.minus_button.grid(row=3, column=0, padx=padx, pady=pady)
+        self.minus_button.grid(row=4, column=0, padx=padx, pady=pady)
         self.minus_button.image = self.minus_img  # Keep a reference
 
         self.add_img = self.resize_img(os.path.join(images_folder, 'Add Button Black.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
         self.add_button = ctk.CTkButton(self, image=self.add_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH,)
-        self.add_button.grid(row=3, column=3, padx=(5,5), pady=pady)
+        self.add_button.grid(row=4, column=3, padx=(5,5), pady=pady)
         self.add_button.image = self.add_img  # Keep a reference
 
-        ctk.CTkLabel(self, text="Increment change:", font=(default_font, default_font_size)).grid(row=4, column=0, columnspan=4, sticky=tk.W)
+        ctk.CTkLabel(self, text="Increment change:", font=(default_font, default_font_size)).grid(row=5, column=0, columnspan=4, sticky=tk.W)
 
         self.pressure_increment_entry = ctk.CTkSlider(self, from_=1, to=20, variable=sv.pressure_increment, width=120)
-        self.pressure_increment_entry.grid(row=5, column=0, padx=padx, columnspan=2)  # Span two columns
+        self.pressure_increment_entry.grid(row=6, column=0, padx=padx, columnspan=2)  # Span two columns
 
-        self.slider_value_entry = ctk.CTkEntry(self, textvariable=sv.pressure_increment, justify=justify, width=40,font=(default_font,20), fg_color=entry_disabled_color, state=tk.DISABLED)
-        self.slider_value_entry.grid(row=5, column=2, padx=padx, columnspan=2, sticky="w")  # Span two columns
+        self.slider_value_entry = ctk.CTkEntry(
+            self,
+            textvariable=sv.pressure_increment,
+            justify=justify,
+            width=40,
+            font=(default_font, 20),
+            fg_color=entry_disabled_color,
+            text_color=entry_text_color,
+            placeholder_text_color=entry_placeholder_color,
+            state=tk.DISABLED,
+        )
+        self.slider_value_entry.grid(row=6, column=2, padx=padx, columnspan=2, sticky="w")  # Span two columns
 
         self.model_vars.app.auto_pressure.trace_add(
             "write", lambda *args: self.start_protocol_button_state_callback()
@@ -3291,15 +3878,22 @@ class PressureControlPane(ToolbarPane):
         for widget, text in tooltips.items():
             tooltip.register(widget, text)
 
+        self.set_lock_state()
+        add_setpoint_listener(self._handle_setpoint_event)
+        self.bind("<Destroy>", self._on_destroy, add="+")
+
 
     def start_protocol_button_state_callback(self):
         running = self.model_vars.app.auto_pressure.get()
         if running:
             self.start_protocol_button.configure(image=self.pressure_stop_img)
-            self.set_pressure_button.configure(state=tk.DISABLED, fg_color="#BDC3C7")
+            self.set_pressure_button.configure(state=tk.DISABLED, fg_color=entry_disabled_color)
         else:
             self.start_protocol_button.configure(image=self.pressure_start_img)
-            self.set_pressure_button.configure(state=tk.NORMAL, fg_color="white")
+            if self._locked:
+                self.set_pressure_button.configure(state=tk.DISABLED, fg_color=entry_disabled_color)
+            else:
+                self.set_pressure_button.configure(state=tk.NORMAL, fg_color=button_enabled_color)
 
     def resize_img(self, img_path, width=50, height=50):  # Match BUTTON_WIDTH and BUTTON_HEIGHT
         img = Image.open(img_path)
@@ -3308,20 +3902,171 @@ class PressureControlPane(ToolbarPane):
         return tk_image
 
     def set_lock_state(self, state=tk.DISABLED):
-        pass
-        #self.start_protocol_button.configure(state=state)
-        #self.set_pressure_entry.configure(state=state)
-        #self.set_pressure_button.configure(state=state)
+        disabled = state == tk.DISABLED
+        self._locked = disabled
+        button_state = tk.DISABLED if disabled else tk.NORMAL
+        slider_state = "disabled" if disabled else "normal"
+        entry_state = tk.DISABLED if disabled else tk.NORMAL
+        entry_bg = entry_disabled_color if disabled else entry_active_color
+
+        self.start_protocol_button.configure(
+            state=button_state,
+            fg_color=entry_disabled_color if disabled else button_enabled_color,
+        )
+        self.set_pressure_button.configure(
+            state=button_state,
+            fg_color=entry_disabled_color if disabled else button_enabled_color,
+        )
+        self.add_button.configure(state=button_state)
+        self.minus_button.configure(state=button_state)
+        self.pressure_increment_entry.configure(state=slider_state)
+        if hasattr(self, "manual_slider"):
+            self.manual_slider.configure(state=slider_state)
+        self.outer_diam_entry.configure(state=entry_state, fg_color=entry_bg)
+        self.slider_value_entry.configure(state=entry_state, fg_color=entry_bg)
 
     def set_unlock_state(self, state=tk.NORMAL):
-        pass
-        #self.start_protocol_button.configure(state=state)
-        #self.set_pressure_entry.configure(state=state)
-        #self.set_pressure_button.configure(state=state)
+        self.set_lock_state(state=tk.NORMAL)
 
     def enable_buttons(self):
         self.start_protocol_button.configure(state=tk.NORMAL)
         self.set_pressure_button.configure(state=tk.NORMAL)
+
+    def _request_device_refresh(self) -> None:
+        if not request_setpoint_refresh():
+            controller = getattr(self.model_vars, "pressure_controller", None)
+            if controller is not None:
+                controller.notify_status(
+                    "No active session to refresh setpoint.", log=False
+                )
+
+    def _handle_setpoint_event(self, value: float, source: str) -> None:
+        def update() -> None:
+            protocol = self.model_vars.toolbar.pressure_protocol
+            now = time.time()
+            lower_source = (source or "").lower()
+            command_sources = {"command", "gui", "pressurecontroller", "script"}
+            ack_sources = {"echo", "device", "device_echo"}
+
+            if lower_source in command_sources:
+                protocol.device_set_source.set(source)
+                self._pending_gui_event = True
+                self._last_gui_event_ts = now
+                pending_text = "Device set pressure: Pending..."
+                if self._last_device_value is not None:
+                    pending_text = f"Device set pressure: Pending... (was {self._last_device_value:.1f} mmHg)"
+                self._device_display_var.set(pending_text)
+                self._apply_device_state(self._colour_amber)
+            elif lower_source in ack_sources:
+                numeric = float(value)
+                self._last_device_value = numeric
+                formatted = f"{numeric:.1f}"
+                protocol.device_set_pressure.set(formatted)
+                protocol.device_set_source.set(source)
+                self.model_vars.toolbar.data_acq.device_set_pressure.set(formatted)
+                self._device_display_var.set(f"Device set pressure: {formatted} mmHg")
+                self._sync_manual_slider(numeric)
+                was_pending = self._pending_gui_event
+                if was_pending and (now - self._last_gui_event_ts) <= 0.5:
+                    self._apply_device_state(self._colour_green)
+                else:
+                    self._apply_device_state(self._colour_neutral)
+                self._pending_gui_event = False
+            else:
+                numeric = float(value)
+                self._last_device_value = numeric
+                formatted = f"{numeric:.1f}"
+                protocol.device_set_pressure.set(formatted)
+                protocol.device_set_source.set(source)
+                self.model_vars.toolbar.data_acq.device_set_pressure.set(formatted)
+                self._device_display_var.set(f"Device set pressure: {formatted} mmHg")
+                self._sync_manual_slider(numeric)
+                self._apply_device_state(self._colour_neutral)
+                self._pending_gui_event = False
+
+            self._recent_events.append((now, lower_source, float(value)))
+            self._refresh_debug_overlay()
+
+        self.after(0, update)
+
+    def _apply_device_state(self, colour: str) -> None:
+        label = getattr(self, "device_set_label", None)
+        if label is None:
+            return
+        try:
+            label.configure(text_color=colour)
+        except tk.TclError:
+            pass
+
+    def _sync_manual_slider(self, value: float) -> None:
+        if not hasattr(self, "manual_slider"):
+            return
+        try:
+            self._suppress_manual_slider = True
+            self.manual_slider.set(value)
+        except Exception:
+            pass
+        finally:
+            self._suppress_manual_slider = False
+
+    def _issue_manual_setpoint(self, value: float, *, update_table: bool) -> None:
+        controller = getattr(self.model_vars, "pressure_controller", None)
+        if controller is None:
+            return
+        numeric = max(0.0, min(200.0, float(value)))
+        protocol = self.model_vars.toolbar.pressure_protocol
+        safe_var_set(protocol.set_pressure, f"{numeric:.1f}")
+        self._sync_manual_slider(numeric)
+        try:
+            controller.adjust_pressure(numeric, update_table=update_table)
+        except Exception as exc:
+            print("Failed to adjust pressure:", exc)
+
+    def _on_manual_slider(self, raw_value: float) -> None:
+        if self._suppress_manual_slider:
+            return
+        numeric = max(0.0, min(200.0, float(raw_value)))
+        protocol = self.model_vars.toolbar.pressure_protocol
+        safe_var_set(protocol.set_pressure, f"{numeric:.1f}")
+        controller = getattr(self.model_vars, "pressure_controller", None)
+        if controller is None:
+            return
+        try:
+            controller.adjust_pressure(numeric, update_table=False)
+        except Exception as exc:
+            print("Failed to adjust pressure:", exc)
+
+    def _toggle_debug_overlay(self) -> None:
+        self._debug_visible = not self._debug_visible
+        if self._debug_visible:
+            self.debug_overlay.grid()
+            self._refresh_debug_overlay()
+        else:
+            self.debug_overlay.grid_remove()
+
+    def _refresh_debug_overlay(self) -> None:
+        if not self._debug_visible:
+            return
+        if not self._recent_events:
+            text = "No recent setpoint events."
+        else:
+            lines = []
+            for ts, src, val in reversed(self._recent_events):
+                timestamp = time.strftime("%H:%M:%S", time.localtime(ts))
+                lines.append(f"{timestamp}  {src}: {val:.1f} mmHg")
+            text = "\n".join(lines)
+        try:
+            self.debug_overlay.configure(text=text)
+        except tk.TclError:
+            pass
+
+    def _on_destroy(self, event) -> None:
+        if self._listener_removed:
+            return
+        if event.widget is not self:
+            return
+        remove_setpoint_listener(self._handle_setpoint_event)
+        self._listener_removed = True
 
 
     def toggle_protocol_button(self):
@@ -3657,7 +4402,7 @@ class Menus:
         self.settings_menu.add_separator()
         self.settings_menu.add_command(label="Pressure Hardware")
 
-        if is_pydaqmx_available():
+        if _PYDAQMX_AVAILABLE:
             self.settings_menu.add_command(label="Configure Pressure Protocol")
 
         notepad_menu = tk.Menu(self.menu_bar, tearoff=0)
@@ -4131,7 +4876,15 @@ class TableFrame(ttk.Frame):
             row=0, column=0, columnspan=5, sticky=tk.N + tk.S + tk.E + tk.W
         )
         #ctk.CTkLabel(table_controls, text="Label:").grid(row=0, column=0)
-        self.label_entry = ctk.CTkEntry(table_controls, width=200, textvariable=sv.label, font=(default_font, default_font_size), fg_color="white")
+        self.label_entry = ctk.CTkEntry(
+            table_controls,
+            width=200,
+            textvariable=sv.label,
+            font=(default_font, default_font_size),
+            fg_color="white",
+            text_color=entry_text_color,
+            placeholder_text_color=entry_placeholder_color,
+        )
         self.label_entry.grid(row=0, column=1)
         self.add_button = ctk.CTkButton(table_controls, text="Add", font=(default_font, default_font_size), width=80, text_color="black")
         self.add_button.grid(row=0, column=2, padx=padx)
@@ -4140,8 +4893,14 @@ class TableFrame(ttk.Frame):
             row=0, column=4, padx=(20, 0)
         )
         self.ref_diam_entry = ctk.CTkEntry(
-            table_controls, width=60, textvariable=sv.ref_diam, font=(default_font, default_font_size), fg_color=entry_disabled_color
-            )
+            table_controls,
+            width=60,
+            textvariable=sv.ref_diam,
+            font=(default_font, default_font_size),
+            fg_color=entry_disabled_color,
+            text_color=entry_text_color,
+            placeholder_text_color=entry_placeholder_color,
+        )
         self.ref_diam_entry.grid(row=0, column=5)
         self.ref_diam_entry.configure(state=tk.DISABLED)
 
@@ -4761,10 +5520,15 @@ class CameraController:
 
 class Controller:
     def __init__(self, root, mmc):
-        self.model = Model(mmc, set_timeout=root.after)
+        self.model = Model(mmc)
+        self.model.set_ui_scheduler(root.after, root.after_cancel)
         shutdown_callbacks = []
         shutdown_callbacks.append(self.model.get_shutdown_callback())
         self.view = View(root, self.model.state, self.set_camera, shutdown_callbacks=shutdown_callbacks)
+        self.ui_throttle = UiThrottle()
+        wire_menu_throttle(root, self.view.menus.menu_bar, self.ui_throttle)
+        self.heartbeat = UiHeartbeat(root, self.ui_throttle, (self.model.process_updates,))
+        self.view.shutdown_callbacks.append(self.heartbeat.stop)
         self.camera_controller = CameraController(self.model, self.view)
 
         # Instantiate the PressureController
@@ -4790,13 +5554,14 @@ class Controller:
         #output_path = self.get_output_filename()
         #self.model.setup_output_files(output_path=output_path)
 
+        self.model.process_updates()
+        self.heartbeat.start()
+
         if self.model.configure.registration.register_flag == 0:
             # Present the registration splash modally so the main window isn’t left unresponsive.
             show_registration_screen(self)
         else:
             root.deiconify()
-
-        self.model.process_updates()
 
     def get_output_filename(self):
         # Create a folder with the current date
@@ -4893,11 +5658,10 @@ class Controller:
             tb.plotting.line_buttons[i].configure(command=partial(self.toggle_line, i))
         '''
 
-        if is_pydaqmx_available():
-            tb.pressure_control_settings.start_protocol_button.configure(command=self.servo_start)
-            #tb.pressure_protocol_settings.stop_protocol_button.configure(command=self.servo_stop)
-            tb.pressure_control_settings.add_button.configure(command=self.increase_pressure)
-            tb.pressure_control_settings.minus_button.configure(command=self.decrease_pressure)
+        tb.pressure_control_settings.start_protocol_button.configure(command=self.servo_start)
+        #tb.pressure_protocol_settings.stop_protocol_button.configure(command=self.servo_stop)
+        tb.pressure_control_settings.add_button.configure(command=self.increase_pressure)
+        tb.pressure_control_settings.minus_button.configure(command=self.decrease_pressure)
 
         tb.start_stop.start_button.configure(command=self.start_acq)
         tb.start_stop.track_button.configure(command=self.start_tracking)
@@ -4906,10 +5670,9 @@ class Controller:
         self.view.table.add_button.configure(command=self.add_table_row)
         self.view.table.ref_button.configure(command=self.set_ref_diameter)
 
-        if is_pydaqmx_available():
-            tb.pressure_control_settings.set_pressure_button.configure(command=self.update_set_pressure)
-            tb.pressure_control_settings.pressure_connect_button.configure(command=self.open_pressure_settings)
-            tb.pressure_control_settings.pressure_settings_button.configure(command=self.open_pressure_protocol_settings)
+        tb.pressure_control_settings.set_pressure_button.configure(command=self.update_set_pressure)
+        tb.pressure_control_settings.pressure_connect_button.configure(command=self.open_pressure_settings)
+        tb.pressure_control_settings.pressure_settings_button.configure(command=self.open_pressure_protocol_settings)
 
 
     def bind_checkboxes(self):
@@ -4980,7 +5743,7 @@ class Controller:
         settings_menu.entryconfig(
             settings_menu.index("Pressure Hardware"), command=self.show_pressure_hardware_popup
         )
-        if is_pydaqmx_available():
+        if _PYDAQMX_AVAILABLE:
             # Create the "Pressure Protocol" dropdown menu
             settings_menu = menu.settings_menu
             settings_menu.entryconfig(
@@ -5112,13 +5875,16 @@ class Controller:
         if current_state == 0:
             if tmb.askokcancel("Start Pressure Protocol", "Are you sure?"):
                 start_time = time.time()
-                self.model.state.toolbar.pressure_protocol.protocol_start_time.set(start_time)
-                self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.set(1)
+                safe_var_set(self.model.state.toolbar.pressure_protocol.protocol_start_time, start_time)
+                safe_var_set(self.model.state.toolbar.pressure_protocol.pressure_protocol_flag, 1)
+                if self.model.pressure_controller is not None:
+                    # Ensure the controller pulls the latest UI values and sets the initial pressure.
+                    self.model.pressure_controller.reset_protocol()
                 #self.view.toolbar.pressure_control_settings.toggle_protocol_button()
                 self.model.state.app.auto_pressure.set(not current_state)
         else:
             if tmb.askokcancel("Stop Pressure Protocol", "Are you sure?"):
-                self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.set(0)
+                safe_var_set(self.model.state.toolbar.pressure_protocol.pressure_protocol_flag, 0)
                 #self.view.toolbar.pressure_control_settings.toggle_protocol_button()
                 self.model.state.app.auto_pressure.set(not current_state)
                 self.model.pressure_controller.reset_protocol()
@@ -5126,23 +5892,39 @@ class Controller:
     def servo_stop(self):
         if self.model.pressure_controller is None:
             return
-        self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.set(0)
+        safe_var_set(self.model.state.toolbar.pressure_protocol.pressure_protocol_flag, 0)
 
     def decrease_pressure(self):
-        increment = self.model.state.toolbar.pressure_protocol.pressure_increment.get()
-        current_pressure = self.model.state.toolbar.pressure_protocol.set_pressure.get()
+        increment = safe_var_float(
+            self.model.state.toolbar.pressure_protocol.pressure_increment, default=1.0
+        )
+        if increment <= 0:
+            increment = 1.0
+        current_pressure = safe_var_float(
+            self.model.state.toolbar.pressure_protocol.set_pressure, default=0.0
+        )
         new_pressure = current_pressure - increment
         if new_pressure < 0:
             new_pressure = 0
-        self.model.state.toolbar.pressure_protocol.set_pressure.set(new_pressure)
+        pane = self.view.toolbar.pressure_control_settings
+        if pane is not None:
+            pane._issue_manual_setpoint(new_pressure, update_table=True)
 
     def increase_pressure(self):
-        increment = self.model.state.toolbar.pressure_protocol.pressure_increment.get()
-        current_pressure = self.model.state.toolbar.pressure_protocol.set_pressure.get()
+        increment = safe_var_float(
+            self.model.state.toolbar.pressure_protocol.pressure_increment, default=1.0
+        )
+        if increment <= 0:
+            increment = 1.0
+        current_pressure = safe_var_float(
+            self.model.state.toolbar.pressure_protocol.set_pressure, default=0.0
+        )
         new_pressure = current_pressure + increment
         if new_pressure > 200:
             new_pressure = 200
-        self.model.state.toolbar.pressure_protocol.set_pressure.set(new_pressure)
+        pane = self.view.toolbar.pressure_control_settings
+        if pane is not None:
+            pane._issue_manual_setpoint(new_pressure, update_table=True)
 
     def start_acq(self):
         current_state = self.model.state.app.acquiring.get()
@@ -5224,19 +6006,25 @@ class Controller:
         self.model.add_table_row()
 
     def update_set_pressure(self):
-        new_pressure_value = self.model.state.toolbar.pressure_protocol.set_pressure.get()
-        if self.pressure_controller is not None:
-            self.pressure_controller.adjust_pressure(new_pressure_value, update_table=True)
+        new_pressure_value = safe_var_float(
+            self.model.state.toolbar.pressure_protocol.set_pressure, default=0.0
+        )
+        pane = self.view.toolbar.pressure_control_settings
+        if pane is not None:
+            pane._issue_manual_setpoint(new_pressure_value, update_table=True)
 
     def open_pressure_settings(self):
-        self.view.toolbar.pressure_control_settings.start_protocol_button.configure(state=tk.NORMAL)
-        self.view.toolbar.pressure_control_settings.start_protocol_button.configure(fg_color='white')
-        self.view.toolbar.pressure_control_settings.set_pressure_button.configure(state=tk.NORMAL)
-        self.view.toolbar.pressure_control_settings.set_pressure_button.configure(fg_color='white')
+        controller = self.pressure_controller
+        if controller is not None:
+            controller.configure_from_state(start_immediately=True)
+            controller.start()
 
-        if self.pressure_controller is not None:
-            self.pressure_controller.configure_from_state(start_immediately=True)
-            self.pressure_controller.start()
+        pane = self.view.toolbar.pressure_control_settings
+        active_type = controller.active_device_type() if controller is not None else "none"
+        if active_type != "none":
+            pane.set_unlock_state()
+        else:
+            pane.set_lock_state()
 
         self.show_pressure_hardware_popup()
 
@@ -5697,9 +6485,6 @@ if __name__ == "__main__":
         sys.exit()
     else:
         mmc = CMMCorePlus(adapter_paths=[mm_path, SYS32_PATH, BASLER_PATH, BASLER_PATH2])
-
-    if not is_pydaqmx_available():
-        tmb.showinfo("Warning", "niDAQmx not found. Please install to enable automatic pressure control.")
 
     # **Schedule Controller Initialization on the Main Thread (No Freezing)**
     root.after(2000, initialize_controller)  # Start loading the app after splash screen

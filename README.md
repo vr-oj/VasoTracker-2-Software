@@ -44,6 +44,9 @@ The repository includes a sketch-agnostic Arduino client (`vasomoto_client.py`) 
 - Install dependencies in your Python environment:
   - `pip install pyserial`
   - `pip install flask` (only needed for the REST bridge)
+- Run the standalone hardware smoke test:
+  - `python scripts/vasomoto_serial_test.py`
+  - Add `--port <SERIAL_PORT>` if auto-detection is insufficient and `--set 60` to send an initial command.
 - Run the serial client directly:
   - `python vasomoto_client.py --port <SERIAL_PORT> --baud 115200 --set 60`
   - Leave `--port`/`--baud` unset to auto-detect common options and watch live telemetry in the console.

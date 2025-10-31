@@ -34,11 +34,18 @@ except ImportError as exc:  # pragma: no cover - runtime dependency
         "pyserial is required for Arduino communication. Install with `pip install pyserial`."
     ) from exc
 
+try:
+    from vasotracker_2.setpoint_bus import notify_setpoint as _bus_notify_setpoint
+except Exception:
+    def _bus_notify_setpoint(value: float, source: str = "external") -> bool:
+        return False
+
 # Common fallback baud rates used by Arduino sketches.
 COMMON_BAUDS: List[int] = [115200, 57600, 38400, 19200, 9600]
 
 # Command templates that cover the most frequently used VasoMoto formats.
 COMMAND_STYLES: List[str] = [
+    "<{v}>\n",
     "P {v}\n",
     "P:{v}\n",
     "P={v}\n",
@@ -213,7 +220,11 @@ class VasoMotoClient:
                 pass
 
         # key:value or key=value pairs
-        tokens = re.split(r"[,\t ]+", stripped)
+        token_source = stripped
+        if token_source.startswith("<") and token_source.endswith(">"):
+            token_source = token_source[1:-1]
+        token_source = token_source.replace(";", " ").replace("|", " ")
+        tokens = re.split(r"[,\t ]+", token_source)
         kv: Dict[str, Any] = {}
         for token in tokens:
             if ":" in token:
@@ -280,6 +291,16 @@ class VasoMotoClient:
             raise RuntimeError("Serial port is not open.")
         self.ser.write(text.encode())
 
+    def send_raw(self, payload: str) -> None:
+        """
+        Send a raw command string to the device. Automatically appends a trailing
+        newline if one is not present so sketches that expect line-based commands
+        continue to work as expected.
+        """
+        if not payload.endswith("\n"):
+            payload += "\n"
+        self._send_line(payload)
+
     def _to_device_units(self, value_mmHg: float) -> float:
         return value_mmHg * self.scale + self.offset
 
@@ -296,11 +317,19 @@ class VasoMotoClient:
         Returns (success, message). Success is inferred from ACK-like telemetry
         or observing the reported pressure move toward the requested setpoint.
         """
-        if target_mmHg < 0:
-            target_mmHg = 0.0
-        if target_mmHg > self.max_pressure:
-            target_mmHg = self.max_pressure
+        try:
+            requested = float(target_mmHg)
+        except Exception:
+            requested = 0.0
+        if requested < 0:
+            requested = 0.0
+        if requested > self.max_pressure:
+            requested = self.max_pressure
 
+        if _bus_notify_setpoint(requested, source="vasomoto_client"):
+            return True, "SessionController accepted setpoint command"
+
+        target_mmHg = requested
         device_value = self._to_device_units(target_mmHg)
         baseline = self._estimate_pressure(self.last_fields)
 
