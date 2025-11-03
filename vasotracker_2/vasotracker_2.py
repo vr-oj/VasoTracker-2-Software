@@ -3537,6 +3537,8 @@ class PressureDevicePane(ToolbarPane):
             text="Detect",
             width=80,
             command=self._on_detect_ports,
+            text_color=entry_text_color,
+            fg_color=button_enabled_color,
         )
         self.detect_ports_button.grid(row=2, column=2, sticky=tk.W, padx=(6, 2), pady=2)
 
@@ -3731,7 +3733,7 @@ class SetupWizard(ctk.CTkToplevel):
     def __init__(self, controller):
         super().__init__(controller.view.root)
         self.controller = controller
-        self.state = controller.model.state
+        self.state_vars = controller.model.state
         self.title("Setup wizard")
         try:
             self.iconbitmap(os.path.join(images_folder, 'vt_icon.ICO'))
@@ -3767,22 +3769,25 @@ class SetupWizard(ctk.CTkToplevel):
             text="Browse...",
             width=120,
             command=self._on_browse_settings,
+            text_color=entry_text_color,
+            fg_color=button_enabled_color,
         )
         browse_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(10, 0))
-        settings_path_label = ctk.CTkLabel(
+        self.settings_path_label = ctk.CTkLabel(
             settings_frame,
             textvariable=self.settings_path_var,
             anchor="w",
             wraplength=420,
-            text_color=VasoTracker_Blue,
+            text_color=entry_text_color,
         )
-        settings_path_label.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        ctk.CTkLabel(
+        self.settings_path_label.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.settings_status_label = ctk.CTkLabel(
             settings_frame,
             textvariable=self.settings_status_var,
             anchor="w",
             text_color=muted_text_color,
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        )
+        self.settings_status_label.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         # Camera section
         camera_frame = ctk.CTkFrame(container)
@@ -3794,19 +3799,22 @@ class SetupWizard(ctk.CTkToplevel):
         camera_options = [ELLIPSIS] + list(Camera.registry.keys())
         self.camera_menu = ctk.CTkOptionMenu(
             camera_frame,
-            variable=self.state.toolbar.acq.camera,
+            variable=self.state_vars.toolbar.acq.camera,
             values=camera_options,
             command=self._on_camera_selected,
             width=220,
+            text_color=entry_text_color,
+            fg_color=entry_active_color,
         )
         self.camera_menu.grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ctk.CTkLabel(
+        self.camera_status_label = ctk.CTkLabel(
             camera_frame,
             textvariable=self.camera_status_var,
             anchor="w",
             wraplength=420,
             text_color=muted_text_color,
-        ).grid(row=2, column=0, sticky="w", pady=(6, 0))
+        )
+        self.camera_status_label.grid(row=2, column=0, sticky="w", pady=(6, 0))
 
         # Pressure hardware section
         pressure_frame = ctk.CTkFrame(container)
@@ -3815,7 +3823,7 @@ class SetupWizard(ctk.CTkToplevel):
         ctk.CTkLabel(pressure_frame, text="3. Configure pressure hardware", font=heading_font).grid(
             row=0, column=0, sticky="w"
         )
-        self.pressure_pane = PressureDevicePane(pressure_frame, self.state)
+        self.pressure_pane = PressureDevicePane(pressure_frame, self.state_vars)
         self.pressure_pane.grid(row=1, column=0, sticky="ew", pady=(6, 0))
 
         # Graph axes section
@@ -3832,9 +3840,15 @@ class SetupWizard(ctk.CTkToplevel):
             anchor="w",
             text_color=muted_text_color,
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 4))
-        graph_sv = self.state.toolbar.graph
+        graph_sv = self.state_vars.toolbar.graph
         label_font = (default_font, default_font_size)
-        entry_kwargs = {"width": 90, "font": (default_font, default_font_size)}
+        entry_kwargs = {
+            "width": 90,
+            "font": (default_font, default_font_size),
+            "fg_color": entry_active_color,
+            "text_color": entry_text_color,
+            "border_color": VasoTracker_Blue,
+        }
         ctk.CTkLabel(graph_frame, text="Time min (s):", font=label_font).grid(row=2, column=0, sticky="w", pady=(4, 2))
         ctk.CTkEntry(graph_frame, textvariable=graph_sv.x_min, **entry_kwargs).grid(row=2, column=1, sticky="w", pady=(4, 2))
         ctk.CTkLabel(graph_frame, text="Time max (s):", font=label_font).grid(row=2, column=2, sticky="w", pady=(4, 2))
@@ -3852,6 +3866,8 @@ class SetupWizard(ctk.CTkToplevel):
             text="Use defaults",
             width=130,
             command=self._reset_graph_axes,
+            text_color=entry_text_color,
+            fg_color=button_enabled_color,
         ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
         # Final actions
@@ -3880,7 +3896,14 @@ class SetupWizard(ctk.CTkToplevel):
         buttons_frame = ctk.CTkFrame(actions_frame)
         buttons_frame.grid(row=4, column=0, sticky="ew", pady=(12, 0))
         buttons_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkButton(buttons_frame, text="Cancel", command=self.on_close, width=110).grid(
+        ctk.CTkButton(
+            buttons_frame,
+            text="Cancel",
+            command=self.on_close,
+            width=110,
+            text_color=entry_text_color,
+            fg_color=button_enabled_color,
+        ).grid(
             row=0, column=0, sticky="w"
         )
         ctk.CTkButton(
@@ -3888,6 +3911,8 @@ class SetupWizard(ctk.CTkToplevel):
             text="Start experiment",
             command=self._on_start_experiment,
             width=170,
+            text_color=entry_text_color,
+            fg_color=button_enabled_color,
         ).grid(row=0, column=1, sticky="e")
 
         self.action_status_label = ctk.CTkLabel(
@@ -3899,7 +3924,7 @@ class SetupWizard(ctk.CTkToplevel):
         )
         self.action_status_label.grid(row=5, column=0, sticky="w", pady=(8, 0))
 
-        self._camera_trace_id = self.state.toolbar.acq.camera.trace_add(
+        self._camera_trace_id = self.state_vars.toolbar.acq.camera.trace_add(
             "write", self._update_camera_status
         )
         self._refresh_settings_display()
@@ -3923,8 +3948,8 @@ class SetupWizard(ctk.CTkToplevel):
         self.settings_path_var.set(display)
 
     def _reset_graph_axes(self):
-        GraphAxisSettings().set_values(self.state)
-        self.state.toolbar.graph.dirty.set(True)
+        GraphAxisSettings().set_values(self.state_vars)
+        self.state_vars.toolbar.graph.dirty.set(True)
         self.action_status_label.configure(text_color=status_neutral_color)
         self.action_status_var.set("Graph axes reset to defaults.")
 
@@ -3942,10 +3967,10 @@ class SetupWizard(ctk.CTkToplevel):
         self._refresh_settings_display()
 
     def _format_camera_status(self) -> str:
-        selected = self.state.toolbar.acq.camera.get()
+        selected = self.state_vars.toolbar.acq.camera.get()
         if not selected or selected == ELLIPSIS:
             return "Camera not selected."
-        active_camera = getattr(self.state.camera, "camera_name", "")
+        active_camera = getattr(self.state_vars.camera, "camera_name", "")
         if active_camera:
             return f"Active camera: {active_camera}"
         return f"Selected camera: {selected}"
@@ -3970,21 +3995,21 @@ class SetupWizard(ctk.CTkToplevel):
                 self.action_status_var.set("Output file setup cancelled.")
                 return
 
-        if self.start_acq_var.get() and not self.state.app.acquiring.get():
+        if self.start_acq_var.get() and not self.state_vars.app.acquiring.get():
             self.controller.start_acq()
-            if not self.state.app.acquiring.get():
+            if not self.state_vars.app.acquiring.get():
                 self.action_status_label.configure(text_color=status_error_color)
                 self.action_status_var.set("Acquisition did not start. Check camera selection.")
                 return
 
-        if self.start_tracking_var.get() and not self.state.app.tracking.get():
+        if self.start_tracking_var.get() and not self.state_vars.app.tracking.get():
             self.controller.start_tracking()
-            if not self.state.app.tracking.get():
+            if not self.state_vars.app.tracking.get():
                 self.action_status_label.configure(text_color=status_error_color)
                 self.action_status_var.set("Tracking did not start. Ensure output file is set.")
                 return
 
-        self.state.toolbar.graph.dirty.set(True)
+        self.state_vars.toolbar.graph.dirty.set(True)
         self.action_status_label.configure(text_color=status_success_color)
         self.action_status_var.set("Experiment started successfully.")
         self.after(200, self.on_close)
@@ -3992,7 +4017,7 @@ class SetupWizard(ctk.CTkToplevel):
     def on_close(self):
         try:
             if getattr(self, "_camera_trace_id", None):
-                self.state.toolbar.acq.camera.trace_remove("write", self._camera_trace_id)
+                self.state_vars.toolbar.acq.camera.trace_remove("write", self._camera_trace_id)
         except tk.TclError:
             pass
         finally:
