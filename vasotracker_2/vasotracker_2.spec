@@ -25,7 +25,7 @@ a = Analysis(
     hiddenimports=['PyDAQmx', 'scipy'],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[os.path.join(spec_dir, "pyinstaller_hooks", "filter_pkg_resources_warning.py")],
     excludes=[],
     noarchive=False,
 )
