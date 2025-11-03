@@ -3723,6 +3723,239 @@ class PressureDevicePane(ToolbarPane):
         self.port_hint_label.configure(text=text)
 
 
+class SetupWizard(ctk.CTkToplevel):
+    def __init__(self, controller):
+        super().__init__(controller.view.root)
+        self.controller = controller
+        self.state = controller.model.state
+        self.title("Setup wizard")
+        try:
+            self.iconbitmap(os.path.join(images_folder, 'vt_icon.ICO'))
+        except Exception:
+            pass
+        self.transient(controller.view.root)
+        self.grab_set()
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        self.settings_path_var = tk.StringVar(master=self)
+        self.settings_status_var = tk.StringVar(master=self, value="Using current settings.")
+        self.camera_status_var = tk.StringVar(master=self)
+        self.action_status_var = tk.StringVar(master=self, value="")
+        self.create_file_var = BooleanVar(master=self, value=True)
+        self.start_acq_var = BooleanVar(master=self, value=True)
+        self.start_tracking_var = BooleanVar(master=self, value=False)
+
+        container = ctk.CTkFrame(self)
+        container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        container.grid_columnconfigure(0, weight=1)
+
+        # Settings section
+        settings_frame = ctk.CTkFrame(container)
+        settings_frame.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        settings_frame.grid_columnconfigure(0, weight=1)
+        heading_font = (default_font, default_font_size + 2, "bold")
+        ctk.CTkLabel(settings_frame, text="1. Load settings", font=heading_font).grid(
+            row=0, column=0, sticky="w"
+        )
+        browse_button = ctk.CTkButton(
+            settings_frame,
+            text="Browse...",
+            width=120,
+            command=self._on_browse_settings,
+        )
+        browse_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(10, 0))
+        settings_path_label = ctk.CTkLabel(
+            settings_frame,
+            textvariable=self.settings_path_var,
+            anchor="w",
+            wraplength=420,
+        )
+        settings_path_label.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        ctk.CTkLabel(
+            settings_frame,
+            textvariable=self.settings_status_var,
+            anchor="w",
+            text_color="#6B7C8F",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        # Camera section
+        camera_frame = ctk.CTkFrame(container)
+        camera_frame.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        camera_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(camera_frame, text="2. Select camera", font=heading_font).grid(
+            row=0, column=0, sticky="w"
+        )
+        camera_options = [ELLIPSIS] + list(Camera.registry.keys())
+        self.camera_menu = ctk.CTkOptionMenu(
+            camera_frame,
+            variable=self.state.toolbar.acq.camera,
+            values=camera_options,
+            command=self._on_camera_selected,
+            width=220,
+        )
+        self.camera_menu.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ctk.CTkLabel(
+            camera_frame,
+            textvariable=self.camera_status_var,
+            anchor="w",
+            wraplength=420,
+            text_color="#6B7C8F",
+        ).grid(row=2, column=0, sticky="w", pady=(6, 0))
+
+        # Pressure hardware section
+        pressure_frame = ctk.CTkFrame(container)
+        pressure_frame.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        pressure_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(pressure_frame, text="3. Configure pressure hardware", font=heading_font).grid(
+            row=0, column=0, sticky="w"
+        )
+        self.pressure_pane = PressureDevicePane(pressure_frame, self.state)
+        self.pressure_pane.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+
+        # Final actions
+        actions_frame = ctk.CTkFrame(container)
+        actions_frame.grid(row=3, column=0, sticky="ew")
+        actions_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(actions_frame, text="4. Run experiment", font=heading_font).grid(
+            row=0, column=0, sticky="w"
+        )
+        ctk.CTkCheckBox(
+            actions_frame,
+            text="Create new output file",
+            variable=self.create_file_var,
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ctk.CTkCheckBox(
+            actions_frame,
+            text="Start acquisition",
+            variable=self.start_acq_var,
+        ).grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ctk.CTkCheckBox(
+            actions_frame,
+            text="Start tracking",
+            variable=self.start_tracking_var,
+        ).grid(row=3, column=0, sticky="w", pady=(6, 0))
+
+        buttons_frame = ctk.CTkFrame(actions_frame)
+        buttons_frame.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        buttons_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkButton(buttons_frame, text="Cancel", command=self.on_close, width=110).grid(
+            row=0, column=0, sticky="w"
+        )
+        ctk.CTkButton(
+            buttons_frame,
+            text="Start experiment",
+            command=self._on_start_experiment,
+            width=170,
+        ).grid(row=0, column=1, sticky="e")
+
+        self.action_status_label = ctk.CTkLabel(
+            actions_frame,
+            textvariable=self.action_status_var,
+            anchor="w",
+            wraplength=420,
+        )
+        self.action_status_label.grid(row=5, column=0, sticky="w", pady=(8, 0))
+
+        self._camera_trace_id = self.state.toolbar.acq.camera.trace_add(
+            "write", self._update_camera_status
+        )
+        self._refresh_settings_display()
+        self._update_camera_status()
+
+    def _shorten_path(self, path: str, max_length: int = 60) -> str:
+        if len(path) <= max_length:
+            return path
+        ellipsis = "..."
+        keep = max_length - len(ellipsis)
+        half = keep // 2
+        return f"{path[:half]}{ellipsis}{path[-(keep - half):]}"
+
+    def _refresh_settings_display(self):
+        config_path = getattr(self.controller.model, "config_path", "")
+        if config_path:
+            abs_path = os.path.abspath(config_path)
+            display = self._shorten_path(abs_path)
+        else:
+            display = "settings.toml (defaults)"
+        self.settings_path_var.set(display)
+
+    def _on_browse_settings(self):
+        current_path = getattr(self.controller.model, "config_path", None)
+        current_dir = os.path.dirname(os.path.abspath(current_path)) if current_path else None
+        current_file = os.path.basename(current_path) if current_path else "settings.toml"
+        changed = self.controller.ask_and_load_settings(
+            initialdir=current_dir, initialfile=current_file
+        )
+        if changed:
+            self.settings_status_var.set("Settings loaded successfully.")
+        else:
+            self.settings_status_var.set("Settings unchanged.")
+        self._refresh_settings_display()
+
+    def _format_camera_status(self) -> str:
+        selected = self.state.toolbar.acq.camera.get()
+        if not selected or selected == ELLIPSIS:
+            return "Camera not selected."
+        active_camera = getattr(self.state.camera, "camera_name", "")
+        if active_camera:
+            return f"Active camera: {active_camera}"
+        return f"Selected camera: {selected}"
+
+    def _update_camera_status(self, *args):
+        self.camera_status_var.set(self._format_camera_status())
+
+    def _on_camera_selected(self, cam_name):
+        if not cam_name or cam_name == ELLIPSIS:
+            return
+        self.controller.set_camera(cam_name)
+        # Allow camera initialization to complete before updating the status text.
+        self.after(200, self._update_camera_status)
+
+    def _on_start_experiment(self):
+        self.action_status_var.set("")
+        self.action_status_label.configure(text_color="#6B7C8F")
+        if self.create_file_var.get():
+            created = self.controller.create_new_file(ask_confirmation=False)
+            if not created:
+                self.action_status_label.configure(text_color="#c0392b")
+                self.action_status_var.set("Output file setup cancelled.")
+                return
+
+        if self.start_acq_var.get() and not self.state.app.acquiring.get():
+            self.controller.start_acq()
+            if not self.state.app.acquiring.get():
+                self.action_status_label.configure(text_color="#c0392b")
+                self.action_status_var.set("Acquisition did not start. Check camera selection.")
+                return
+
+        if self.start_tracking_var.get() and not self.state.app.tracking.get():
+            self.controller.start_tracking()
+            if not self.state.app.tracking.get():
+                self.action_status_label.configure(text_color="#c0392b")
+                self.action_status_var.set("Tracking did not start. Ensure output file is set.")
+                return
+
+        self.action_status_label.configure(text_color="#2ecc71")
+        self.action_status_var.set("Experiment started successfully.")
+        self.after(200, self.on_close)
+
+    def on_close(self):
+        try:
+            if getattr(self, "_camera_trace_id", None):
+                self.state.toolbar.acq.camera.trace_remove("write", self._camera_trace_id)
+        except tk.TclError:
+            pass
+        finally:
+            self._camera_trace_id = None
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.controller.notify_setup_wizard_closed(self)
+        self.destroy()
+
+
 class PressureControlPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
         super().__init__(parent, height=400, width=400)
@@ -4383,6 +4616,9 @@ class Menus:
         )
         file_menu.add_command(
             label="Save settings...",
+        )
+        file_menu.add_command(
+            label="Setup wizard...",
         )
         file_menu.add_separator()
         file_menu.add_command(
@@ -5550,6 +5786,7 @@ class Controller:
         self.bind_menu_items()
 
         self.output_path = None
+        self._setup_wizard = None
 
         #output_path = self.get_output_filename()
         #self.model.setup_output_files(output_path=output_path)
@@ -5698,6 +5935,9 @@ class Controller:
         )
         file.entryconfig(
             file.index("Save settings..."), command=self.menu_save_settings
+        )
+        file.entryconfig(
+            file.index("Setup wizard..."), command=self.open_setup_wizard
         )
         file.entryconfig(file.index("Exit"), command=self.menu_exit)
 
@@ -6076,46 +6316,72 @@ class Controller:
             self.reset_model_variables()
 
 
+    def create_new_file(self, *, ask_confirmation: bool = True) -> bool:
+        if ask_confirmation:
+            proceed = tmb.askokcancel("New experiment...", "Are you sure?")
+            if not proceed:
+                return False
+
+        self.model.state.app.tracking.set(False)
+        self.model.state.app.tracking.set(False)
+
+        self.output_path = None
+        self.output_path = self.get_output_filename()
+        if not self.output_path:
+            return False
+
+        self.model.setup_output_files(output_path=self.output_path)
+        self.model.state.table.clear.set(True)
+        self.model.state.graph.clear.set(True)
+        #TODO: Clear all data!!!
+        return True
+
     def menu_new_file(self):
-        if tmb.askokcancel("New experiment...", "Are you sure?"):
-            self.model.state.app.tracking.set(False)
-            self.model.state.app.tracking.set(False)
+        self.create_new_file()
 
-            self.output_path = None
-            self.output_path = self.get_output_filename()
-            if self.output_path:
-                self.model.setup_output_files(output_path=self.output_path)
+    def ask_and_load_settings(self, *, initialdir: Optional[str] = None, initialfile: Optional[str] = "settings.toml") -> bool:
+        if initialdir is None:
+            config_path = getattr(self.model, "config_path", None)
+            if config_path:
+                initialdir = os.path.abspath(os.path.dirname(config_path))
+            else:
+                initialdir = os.getcwd()
 
-                self.model.state.table.clear.set(True)
-                self.model.state.graph.clear.set(True)
-            #TODO: Clear all data!!!
-
-    def menu_load_settings(self):
         settings_filename = filedialog.askopenfilename(
             defaultextension=".toml",
             filetypes=(("toml files", "*.toml"), ("all files", "*.*")),
-            initialfile="settings.toml",
-            initialdir=os.getcwd(),
+            initialfile=initialfile,
+            initialdir=initialdir,
         )
+        return self.load_settings_from_path(settings_filename)
+
+    def load_settings_from_path(self, settings_filename: Optional[str]) -> bool:
+        if not settings_filename:
+            return False
         try:
             new_config = Config.from_file(settings_filename)
-        except:
+        except Exception:
             traceback.print_exc()
             tmb.showerror(
                 "Failed to load config",
                 "Failed to load config file, continuing with previous settings",
             )
-            return
+            return False
 
         try:
             self.model.load_config(new_config)
-        except:
+        except Exception:
             traceback.print_exc()
             tmb.showerror(
                 "Critical error loading settings",
                 "More details printed to console. App will now close.",
             )
             self.view.shutdown_app(force=True)
+            return False
+        return True
+
+    def menu_load_settings(self):
+        self.ask_and_load_settings()
     
     def update_settings(self, flag_name, value):
         config = self.model.to_config()
@@ -6139,6 +6405,17 @@ class Controller:
             return
         print("Saving settings to: ", path)
         self.model.to_config().save(override_path=path)
+
+    def open_setup_wizard(self):
+        if self._setup_wizard is not None and self._setup_wizard.winfo_exists():
+            self._setup_wizard.lift()
+            self._setup_wizard.focus_set()
+            return
+        self._setup_wizard = SetupWizard(self)
+
+    def notify_setup_wizard_closed(self, wizard) -> None:
+        if self._setup_wizard is wizard:
+            self._setup_wizard = None
 
     def menu_exit(self):
         self.view.shutdown_app()
