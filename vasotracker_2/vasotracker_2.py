@@ -160,8 +160,12 @@ frame_label_height = 25
 entry_disabled_color="#BDC3C7"
 entry_active_color="#FFFFFF"
 entry_text_color="#0B2533"
-entry_placeholder_color="#6B7C8F"
+entry_placeholder_color="#3F4E5F"
 button_enabled_color="white"
+muted_text_color="#1F2A35"
+status_error_color="#B03A2E"
+status_success_color="#1E8449"
+status_neutral_color=muted_text_color
 
 # The following is so that the required resources are included in the PyInstaller build.
 # Utility functions
@@ -3598,7 +3602,7 @@ class PressureDevicePane(ToolbarPane):
             self,
             text="",
             font=(default_font, default_font_size - 2),
-            text_color="#6c7a89",
+            text_color=muted_text_color,
         )
         self.port_hint_label.grid(
             row=8,
@@ -3770,13 +3774,14 @@ class SetupWizard(ctk.CTkToplevel):
             textvariable=self.settings_path_var,
             anchor="w",
             wraplength=420,
+            text_color=VasoTracker_Blue,
         )
         settings_path_label.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         ctk.CTkLabel(
             settings_frame,
             textvariable=self.settings_status_var,
             anchor="w",
-            text_color="#6B7C8F",
+            text_color=muted_text_color,
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         # Camera section
@@ -3800,7 +3805,7 @@ class SetupWizard(ctk.CTkToplevel):
             textvariable=self.camera_status_var,
             anchor="w",
             wraplength=420,
-            text_color="#6B7C8F",
+            text_color=muted_text_color,
         ).grid(row=2, column=0, sticky="w", pady=(6, 0))
 
         # Pressure hardware section
@@ -3813,11 +3818,47 @@ class SetupWizard(ctk.CTkToplevel):
         self.pressure_pane = PressureDevicePane(pressure_frame, self.state)
         self.pressure_pane.grid(row=1, column=0, sticky="ew", pady=(6, 0))
 
+        # Graph axes section
+        graph_frame = ctk.CTkFrame(container)
+        graph_frame.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        for col in range(4):
+            graph_frame.grid_columnconfigure(col, weight=1)
+        ctk.CTkLabel(graph_frame, text="4. Configure graph axes", font=heading_font).grid(
+            row=0, column=0, columnspan=4, sticky="w"
+        )
+        ctk.CTkLabel(
+            graph_frame,
+            text="Adjust limits for time, outer diameter (OD), and inner diameter (ID).",
+            anchor="w",
+            text_color=muted_text_color,
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 4))
+        graph_sv = self.state.toolbar.graph
+        label_font = (default_font, default_font_size)
+        entry_kwargs = {"width": 90, "font": (default_font, default_font_size)}
+        ctk.CTkLabel(graph_frame, text="Time min (s):", font=label_font).grid(row=2, column=0, sticky="w", pady=(4, 2))
+        ctk.CTkEntry(graph_frame, textvariable=graph_sv.x_min, **entry_kwargs).grid(row=2, column=1, sticky="w", pady=(4, 2))
+        ctk.CTkLabel(graph_frame, text="Time max (s):", font=label_font).grid(row=2, column=2, sticky="w", pady=(4, 2))
+        ctk.CTkEntry(graph_frame, textvariable=graph_sv.x_max, **entry_kwargs).grid(row=2, column=3, sticky="w", pady=(4, 2))
+        ctk.CTkLabel(graph_frame, text="OD min (\u03bcm):", font=label_font).grid(row=3, column=0, sticky="w", pady=(4, 2))
+        ctk.CTkEntry(graph_frame, textvariable=graph_sv.y_min_od, **entry_kwargs).grid(row=3, column=1, sticky="w", pady=(4, 2))
+        ctk.CTkLabel(graph_frame, text="OD max (\u03bcm):", font=label_font).grid(row=3, column=2, sticky="w", pady=(4, 2))
+        ctk.CTkEntry(graph_frame, textvariable=graph_sv.y_max_od, **entry_kwargs).grid(row=3, column=3, sticky="w", pady=(4, 2))
+        ctk.CTkLabel(graph_frame, text="ID min (\u03bcm):", font=label_font).grid(row=4, column=0, sticky="w", pady=(4, 2))
+        ctk.CTkEntry(graph_frame, textvariable=graph_sv.y_min_id, **entry_kwargs).grid(row=4, column=1, sticky="w", pady=(4, 2))
+        ctk.CTkLabel(graph_frame, text="ID max (\u03bcm):", font=label_font).grid(row=4, column=2, sticky="w", pady=(4, 2))
+        ctk.CTkEntry(graph_frame, textvariable=graph_sv.y_max_id, **entry_kwargs).grid(row=4, column=3, sticky="w", pady=(4, 2))
+        ctk.CTkButton(
+            graph_frame,
+            text="Use defaults",
+            width=130,
+            command=self._reset_graph_axes,
+        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 0))
+
         # Final actions
         actions_frame = ctk.CTkFrame(container)
-        actions_frame.grid(row=3, column=0, sticky="ew")
+        actions_frame.grid(row=4, column=0, sticky="ew")
         actions_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(actions_frame, text="4. Run experiment", font=heading_font).grid(
+        ctk.CTkLabel(actions_frame, text="5. Run experiment", font=heading_font).grid(
             row=0, column=0, sticky="w"
         )
         ctk.CTkCheckBox(
@@ -3854,6 +3895,7 @@ class SetupWizard(ctk.CTkToplevel):
             textvariable=self.action_status_var,
             anchor="w",
             wraplength=420,
+            text_color=status_neutral_color,
         )
         self.action_status_label.grid(row=5, column=0, sticky="w", pady=(8, 0))
 
@@ -3879,6 +3921,12 @@ class SetupWizard(ctk.CTkToplevel):
         else:
             display = "settings.toml (defaults)"
         self.settings_path_var.set(display)
+
+    def _reset_graph_axes(self):
+        GraphAxisSettings().set_values(self.state)
+        self.state.toolbar.graph.dirty.set(True)
+        self.action_status_label.configure(text_color=status_neutral_color)
+        self.action_status_var.set("Graph axes reset to defaults.")
 
     def _on_browse_settings(self):
         current_path = getattr(self.controller.model, "config_path", None)
@@ -3914,29 +3962,30 @@ class SetupWizard(ctk.CTkToplevel):
 
     def _on_start_experiment(self):
         self.action_status_var.set("")
-        self.action_status_label.configure(text_color="#6B7C8F")
+        self.action_status_label.configure(text_color=status_neutral_color)
         if self.create_file_var.get():
             created = self.controller.create_new_file(ask_confirmation=False)
             if not created:
-                self.action_status_label.configure(text_color="#c0392b")
+                self.action_status_label.configure(text_color=status_error_color)
                 self.action_status_var.set("Output file setup cancelled.")
                 return
 
         if self.start_acq_var.get() and not self.state.app.acquiring.get():
             self.controller.start_acq()
             if not self.state.app.acquiring.get():
-                self.action_status_label.configure(text_color="#c0392b")
+                self.action_status_label.configure(text_color=status_error_color)
                 self.action_status_var.set("Acquisition did not start. Check camera selection.")
                 return
 
         if self.start_tracking_var.get() and not self.state.app.tracking.get():
             self.controller.start_tracking()
             if not self.state.app.tracking.get():
-                self.action_status_label.configure(text_color="#c0392b")
+                self.action_status_label.configure(text_color=status_error_color)
                 self.action_status_var.set("Tracking did not start. Ensure output file is set.")
                 return
 
-        self.action_status_label.configure(text_color="#2ecc71")
+        self.state.toolbar.graph.dirty.set(True)
+        self.action_status_label.configure(text_color=status_success_color)
         self.action_status_var.set("Experiment started successfully.")
         self.after(200, self.on_close)
 
