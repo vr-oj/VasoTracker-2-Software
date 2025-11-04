@@ -540,7 +540,24 @@ class PressureController:
             pass
 
         if sp is not None:
-            self._set_var_safe(tb.pressure_protocol.set_pressure, f"{round(float(sp), 2):.2f}")
+            try:
+                numeric_sp = float(sp)
+            except (TypeError, ValueError):
+                numeric_sp = None
+            else:
+                if numeric_sp is not None and not math.isnan(numeric_sp):
+                    protocol_formatted = f"{numeric_sp:.2f}"
+                    device_formatted = f"{numeric_sp:.1f}"
+                    self._set_var_safe(tb.pressure_protocol.set_pressure, protocol_formatted)
+                    device_set_var = getattr(tb.pressure_protocol, "device_set_pressure", None)
+                    if device_set_var is not None:
+                        self._set_var_safe(device_set_var, device_formatted)
+                    device_source_var = getattr(tb.pressure_protocol, "device_set_source", None)
+                    if device_source_var is not None:
+                        self._set_var_safe(device_source_var, "device")
+                    data_acq_device_var = getattr(tb.data_acq, "device_set_pressure", None)
+                    if data_acq_device_var is not None:
+                        self._set_var_safe(data_acq_device_var, device_formatted)
 
     def get_latest(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         return self._latest
