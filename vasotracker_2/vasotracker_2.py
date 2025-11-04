@@ -163,9 +163,6 @@ entry_text_color="#0B2533"
 entry_placeholder_color="#3F4E5F"
 button_enabled_color="white"
 muted_text_color="#1F2A35"
-status_error_color="#B03A2E"
-status_success_color="#1E8449"
-status_neutral_color=muted_text_color
 
 # The following is so that the required resources are included in the PyInstaller build.
 # Utility functions
@@ -3729,307 +3726,6 @@ class PressureDevicePane(ToolbarPane):
         self.port_hint_label.configure(text=text)
 
 
-class SetupWizard(ctk.CTkToplevel):
-    def __init__(self, controller):
-        super().__init__(controller.view.root)
-        self.controller = controller
-        self.state_vars = controller.model.state
-        self.title("Setup wizard")
-        try:
-            self.iconbitmap(os.path.join(images_folder, 'vt_icon.ICO'))
-        except Exception:
-            pass
-        self.transient(controller.view.root)
-        self.grab_set()
-        self.resizable(False, False)
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
-
-        self.settings_path_var = tk.StringVar(master=self)
-        self.settings_status_var = tk.StringVar(master=self, value="Using current settings.")
-        self.camera_status_var = tk.StringVar(master=self)
-        self.action_status_var = tk.StringVar(master=self, value="")
-        self.create_file_var = BooleanVar(master=self, value=True)
-        self.start_acq_var = BooleanVar(master=self, value=True)
-        self.start_tracking_var = BooleanVar(master=self, value=False)
-
-        container = ctk.CTkFrame(self)
-        container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-        container.grid_columnconfigure(0, weight=1)
-
-        # Settings section
-        settings_frame = ctk.CTkFrame(container)
-        settings_frame.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        settings_frame.grid_columnconfigure(0, weight=1)
-        heading_font = (default_font, default_font_size + 2, "bold")
-        ctk.CTkLabel(settings_frame, text="1. Load settings", font=heading_font).grid(
-            row=0, column=0, sticky="w"
-        )
-        browse_button = ctk.CTkButton(
-            settings_frame,
-            text="Browse...",
-            width=120,
-            command=self._on_browse_settings,
-            text_color=entry_text_color,
-            fg_color=button_enabled_color,
-        )
-        browse_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(10, 0))
-        self.settings_path_label = ctk.CTkLabel(
-            settings_frame,
-            textvariable=self.settings_path_var,
-            anchor="w",
-            wraplength=420,
-            text_color=entry_text_color,
-        )
-        self.settings_path_label.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        self.settings_status_label = ctk.CTkLabel(
-            settings_frame,
-            textvariable=self.settings_status_var,
-            anchor="w",
-            text_color=muted_text_color,
-        )
-        self.settings_status_label.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
-
-        # Camera section
-        camera_frame = ctk.CTkFrame(container)
-        camera_frame.grid(row=1, column=0, sticky="ew", pady=(0, 12))
-        camera_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(camera_frame, text="2. Select camera", font=heading_font).grid(
-            row=0, column=0, sticky="w"
-        )
-        camera_options = [ELLIPSIS] + list(Camera.registry.keys())
-        self.camera_menu = ctk.CTkOptionMenu(
-            camera_frame,
-            variable=self.state_vars.toolbar.acq.camera,
-            values=camera_options,
-            command=self._on_camera_selected,
-            width=220,
-            text_color=entry_text_color,
-            fg_color=entry_active_color,
-        )
-        self.camera_menu.grid(row=1, column=0, sticky="w", pady=(6, 0))
-        self.camera_status_label = ctk.CTkLabel(
-            camera_frame,
-            textvariable=self.camera_status_var,
-            anchor="w",
-            wraplength=420,
-            text_color=muted_text_color,
-        )
-        self.camera_status_label.grid(row=2, column=0, sticky="w", pady=(6, 0))
-
-        # Pressure hardware section
-        pressure_frame = ctk.CTkFrame(container)
-        pressure_frame.grid(row=2, column=0, sticky="ew", pady=(0, 12))
-        pressure_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(pressure_frame, text="3. Configure pressure hardware", font=heading_font).grid(
-            row=0, column=0, sticky="w"
-        )
-        self.pressure_pane = PressureDevicePane(pressure_frame, self.state_vars)
-        self.pressure_pane.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-
-        # Graph axes section
-        graph_frame = ctk.CTkFrame(container)
-        graph_frame.grid(row=3, column=0, sticky="ew", pady=(0, 12))
-        for col in range(4):
-            graph_frame.grid_columnconfigure(col, weight=1)
-        ctk.CTkLabel(graph_frame, text="4. Configure graph axes", font=heading_font).grid(
-            row=0, column=0, columnspan=4, sticky="w"
-        )
-        ctk.CTkLabel(
-            graph_frame,
-            text="Adjust limits for time, outer diameter (OD), and inner diameter (ID).",
-            anchor="w",
-            text_color=muted_text_color,
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 4))
-        graph_sv = self.state_vars.toolbar.graph
-        label_font = (default_font, default_font_size)
-        entry_kwargs = {
-            "width": 90,
-            "font": (default_font, default_font_size),
-            "fg_color": entry_active_color,
-            "text_color": entry_text_color,
-            "border_color": VasoTracker_Blue,
-        }
-        ctk.CTkLabel(graph_frame, text="Time min (s):", font=label_font).grid(row=2, column=0, sticky="w", pady=(4, 2))
-        ctk.CTkEntry(graph_frame, textvariable=graph_sv.x_min, **entry_kwargs).grid(row=2, column=1, sticky="w", pady=(4, 2))
-        ctk.CTkLabel(graph_frame, text="Time max (s):", font=label_font).grid(row=2, column=2, sticky="w", pady=(4, 2))
-        ctk.CTkEntry(graph_frame, textvariable=graph_sv.x_max, **entry_kwargs).grid(row=2, column=3, sticky="w", pady=(4, 2))
-        ctk.CTkLabel(graph_frame, text="OD min (\u03bcm):", font=label_font).grid(row=3, column=0, sticky="w", pady=(4, 2))
-        ctk.CTkEntry(graph_frame, textvariable=graph_sv.y_min_od, **entry_kwargs).grid(row=3, column=1, sticky="w", pady=(4, 2))
-        ctk.CTkLabel(graph_frame, text="OD max (\u03bcm):", font=label_font).grid(row=3, column=2, sticky="w", pady=(4, 2))
-        ctk.CTkEntry(graph_frame, textvariable=graph_sv.y_max_od, **entry_kwargs).grid(row=3, column=3, sticky="w", pady=(4, 2))
-        ctk.CTkLabel(graph_frame, text="ID min (\u03bcm):", font=label_font).grid(row=4, column=0, sticky="w", pady=(4, 2))
-        ctk.CTkEntry(graph_frame, textvariable=graph_sv.y_min_id, **entry_kwargs).grid(row=4, column=1, sticky="w", pady=(4, 2))
-        ctk.CTkLabel(graph_frame, text="ID max (\u03bcm):", font=label_font).grid(row=4, column=2, sticky="w", pady=(4, 2))
-        ctk.CTkEntry(graph_frame, textvariable=graph_sv.y_max_id, **entry_kwargs).grid(row=4, column=3, sticky="w", pady=(4, 2))
-        ctk.CTkButton(
-            graph_frame,
-            text="Use defaults",
-            width=130,
-            command=self._reset_graph_axes,
-            text_color=entry_text_color,
-            fg_color=button_enabled_color,
-        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 0))
-
-        # Final actions
-        actions_frame = ctk.CTkFrame(container)
-        actions_frame.grid(row=4, column=0, sticky="ew")
-        actions_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(actions_frame, text="5. Run experiment", font=heading_font).grid(
-            row=0, column=0, sticky="w"
-        )
-        ctk.CTkCheckBox(
-            actions_frame,
-            text="Create new output file",
-            variable=self.create_file_var,
-        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ctk.CTkCheckBox(
-            actions_frame,
-            text="Start acquisition",
-            variable=self.start_acq_var,
-        ).grid(row=2, column=0, sticky="w", pady=(6, 0))
-        ctk.CTkCheckBox(
-            actions_frame,
-            text="Start tracking",
-            variable=self.start_tracking_var,
-        ).grid(row=3, column=0, sticky="w", pady=(6, 0))
-
-        buttons_frame = ctk.CTkFrame(actions_frame)
-        buttons_frame.grid(row=4, column=0, sticky="ew", pady=(12, 0))
-        buttons_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkButton(
-            buttons_frame,
-            text="Cancel",
-            command=self.on_close,
-            width=110,
-            text_color=entry_text_color,
-            fg_color=button_enabled_color,
-        ).grid(
-            row=0, column=0, sticky="w"
-        )
-        ctk.CTkButton(
-            buttons_frame,
-            text="Start experiment",
-            command=self._on_start_experiment,
-            width=170,
-            text_color=entry_text_color,
-            fg_color=button_enabled_color,
-        ).grid(row=0, column=1, sticky="e")
-
-        self.action_status_label = ctk.CTkLabel(
-            actions_frame,
-            textvariable=self.action_status_var,
-            anchor="w",
-            wraplength=420,
-            text_color=status_neutral_color,
-        )
-        self.action_status_label.grid(row=5, column=0, sticky="w", pady=(8, 0))
-
-        self._camera_trace_id = self.state_vars.toolbar.acq.camera.trace_add(
-            "write", self._update_camera_status
-        )
-        self._refresh_settings_display()
-        self._update_camera_status()
-
-    def _shorten_path(self, path: str, max_length: int = 60) -> str:
-        if len(path) <= max_length:
-            return path
-        ellipsis = "..."
-        keep = max_length - len(ellipsis)
-        half = keep // 2
-        return f"{path[:half]}{ellipsis}{path[-(keep - half):]}"
-
-    def _refresh_settings_display(self):
-        config_path = getattr(self.controller.model, "config_path", "")
-        if config_path:
-            abs_path = os.path.abspath(config_path)
-            display = self._shorten_path(abs_path)
-        else:
-            display = "settings.toml (defaults)"
-        self.settings_path_var.set(display)
-
-    def _reset_graph_axes(self):
-        GraphAxisSettings().set_values(self.state_vars)
-        self.state_vars.toolbar.graph.dirty.set(True)
-        self.action_status_label.configure(text_color=status_neutral_color)
-        self.action_status_var.set("Graph axes reset to defaults.")
-
-    def _on_browse_settings(self):
-        current_path = getattr(self.controller.model, "config_path", None)
-        current_dir = os.path.dirname(os.path.abspath(current_path)) if current_path else None
-        current_file = os.path.basename(current_path) if current_path else "settings.toml"
-        changed = self.controller.ask_and_load_settings(
-            initialdir=current_dir, initialfile=current_file
-        )
-        if changed:
-            self.settings_status_var.set("Settings loaded successfully.")
-        else:
-            self.settings_status_var.set("Settings unchanged.")
-        self._refresh_settings_display()
-
-    def _format_camera_status(self) -> str:
-        selected = self.state_vars.toolbar.acq.camera.get()
-        if not selected or selected == ELLIPSIS:
-            return "Camera not selected."
-        active_camera = getattr(self.state_vars.camera, "camera_name", "")
-        if active_camera:
-            return f"Active camera: {active_camera}"
-        return f"Selected camera: {selected}"
-
-    def _update_camera_status(self, *args):
-        self.camera_status_var.set(self._format_camera_status())
-
-    def _on_camera_selected(self, cam_name):
-        if not cam_name or cam_name == ELLIPSIS:
-            return
-        self.controller.set_camera(cam_name)
-        # Allow camera initialization to complete before updating the status text.
-        self.after(200, self._update_camera_status)
-
-    def _on_start_experiment(self):
-        self.action_status_var.set("")
-        self.action_status_label.configure(text_color=status_neutral_color)
-        if self.create_file_var.get():
-            created = self.controller.create_new_file(ask_confirmation=False)
-            if not created:
-                self.action_status_label.configure(text_color=status_error_color)
-                self.action_status_var.set("Output file setup cancelled.")
-                return
-
-        if self.start_acq_var.get() and not self.state_vars.app.acquiring.get():
-            self.controller.start_acq()
-            if not self.state_vars.app.acquiring.get():
-                self.action_status_label.configure(text_color=status_error_color)
-                self.action_status_var.set("Acquisition did not start. Check camera selection.")
-                return
-
-        if self.start_tracking_var.get() and not self.state_vars.app.tracking.get():
-            self.controller.start_tracking()
-            if not self.state_vars.app.tracking.get():
-                self.action_status_label.configure(text_color=status_error_color)
-                self.action_status_var.set("Tracking did not start. Ensure output file is set.")
-                return
-
-        self.state_vars.toolbar.graph.dirty.set(True)
-        self.action_status_label.configure(text_color=status_success_color)
-        self.action_status_var.set("Experiment started successfully.")
-        self.after(200, self.on_close)
-
-    def on_close(self):
-        try:
-            if getattr(self, "_camera_trace_id", None):
-                self.state_vars.toolbar.acq.camera.trace_remove("write", self._camera_trace_id)
-        except tk.TclError:
-            pass
-        finally:
-            self._camera_trace_id = None
-        try:
-            self.grab_release()
-        except tk.TclError:
-            pass
-        self.controller.notify_setup_wizard_closed(self)
-        self.destroy()
-
-
 class PressureControlPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
         super().__init__(parent, height=400, width=400)
@@ -4690,9 +4386,6 @@ class Menus:
         )
         file_menu.add_command(
             label="Save settings...",
-        )
-        file_menu.add_command(
-            label="Setup wizard...",
         )
         file_menu.add_separator()
         file_menu.add_command(
@@ -5860,7 +5553,6 @@ class Controller:
         self.bind_menu_items()
 
         self.output_path = None
-        self._setup_wizard = None
 
         #output_path = self.get_output_filename()
         #self.model.setup_output_files(output_path=output_path)
@@ -6009,9 +5701,6 @@ class Controller:
         )
         file.entryconfig(
             file.index("Save settings..."), command=self.menu_save_settings
-        )
-        file.entryconfig(
-            file.index("Setup wizard..."), command=self.open_setup_wizard
         )
         file.entryconfig(file.index("Exit"), command=self.menu_exit)
 
@@ -6479,17 +6168,6 @@ class Controller:
             return
         print("Saving settings to: ", path)
         self.model.to_config().save(override_path=path)
-
-    def open_setup_wizard(self):
-        if self._setup_wizard is not None and self._setup_wizard.winfo_exists():
-            self._setup_wizard.lift()
-            self._setup_wizard.focus_set()
-            return
-        self._setup_wizard = SetupWizard(self)
-
-    def notify_setup_wizard_closed(self, wizard) -> None:
-        if self._setup_wizard is wizard:
-            self._setup_wizard = None
 
     def menu_exit(self):
         self.view.shutdown_app()
