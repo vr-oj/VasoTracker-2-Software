@@ -8,7 +8,7 @@
 # #################################################
 
 """
-Cross-platform Arduino serial helper used by the pressure device layer.
+Cross-platform VasoMotor serial helper used by the pressure device layer.
 
 The previous implementation relied on Windows-specific discovery logic and
 device-specific framing. This module now provides a lightweight wrapper over
@@ -26,7 +26,7 @@ try:
     import serial
 except ImportError as exc:  # pragma: no cover - handled at runtime
     raise ImportError(
-        "pyserial is required for Arduino communication. Install with `pip install pyserial`."
+        "pyserial is required for VasoMotor communication. Install with `pip install pyserial`."
     ) from exc
 
 
@@ -39,7 +39,7 @@ class Arduino:
     port:
         Serial port string (e.g. 'COM5', '/dev/ttyACM0', or 'loop://').
     baud:
-        Baud rate used by the Arduino sketch (default: 115200).
+        Baud rate used by the VasoMotor sketch (default: 115200).
     timeout:
         Default read timeout in seconds (overridden per-call by `readline`).
     auto_connect:
@@ -116,7 +116,7 @@ class Arduino:
 
     def sendData(self, text: str) -> None:
         """
-        Send ASCII text to the Arduino and bridge modern commands to the
+        Send ASCII text to the VasoMotor controller and bridge modern commands to the
         legacy angle-bracket protocol expected by older firmware.
         """
         if not self.serial or not self.serial.is_open:
@@ -184,18 +184,18 @@ class Arduino:
         self._last_error = exc
         message = (
             f"Unable to open serial port '{self.port}':\n{exc}\n\n"
-            "Tip: close Arduino Serial Monitor or any app using the port."
+            "Tip: close the Arduino IDE Serial Monitor or any app using the port."
         )
         if self._show_errors:
             try:
                 # Lazy import keeps this utility usable in headless contexts.
                 from tkinter import messagebox
 
-                messagebox.showerror("Arduino connection failed", message)
+                messagebox.showerror("VasoMotor connection failed", message)
             except Exception:
-                print("Arduino connection failed:", message)
+                print("VasoMotor connection failed:", message)
         else:
-            print("Arduino connection failed:", message)
+            print("VasoMotor connection failed:", message)
         self._error_notified = True
 
 

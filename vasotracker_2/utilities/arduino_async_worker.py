@@ -10,7 +10,7 @@ try:
     from serial.tools import list_ports
 except ImportError as exc:  # pragma: no cover - runtime dependency
     raise ImportError(
-        "pyserial is required for Arduino communication. Install with `pip install pyserial`."
+        "pyserial is required for VasoMotor communication. Install with `pip install pyserial`."
     ) from exc
 
 from .arduino_link_monitor import LinkMonitor, LinkState
@@ -29,7 +29,7 @@ class ArduinoSerialWorker:
     """
 
     DEFAULT_WRITE_QUEUE = 256
-    PRIORITY_HINTS = ("arduino", "ch340", "usb serial", "ftdi", "silicon labs")
+    PRIORITY_HINTS = ("vasomotor", "vasomoto", "arduino", "ch340", "usb serial", "ftdi", "silicon labs")
 
     def __init__(
         self,

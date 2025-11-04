@@ -176,16 +176,27 @@ class MemorySettings(Configurator):
 
 @dataclass
 class PressureHardwareSettings(Configurator):
-    device: str = "Arduino"
+    device: str = "VasoMotor"
     port: str = "COM5"
     baud: int = 115200
     ni_device: str = "Dev1"
     ni_ao_channel: str = "ao1"
     ni_scale: float = 0.01
 
+    @staticmethod
+    def _normalize_device_name(name: Optional[str]) -> str:
+        if not isinstance(name, str):
+            return "VasoMotor"
+        lowered = name.strip().lower()
+        if lowered == "arduino":
+            return "VasoMotor"
+        if lowered in ("vasomotor", "vasomoto"):
+            return "VasoMotor"
+        return name
+
     def set_values(self, state: "VtState"):
         hardware = state.toolbar.pressure_device
-        _safe_set(hardware.device_type, self.device)
+        _safe_set(hardware.device_type, self._normalize_device_name(self.device))
         _safe_set(hardware.port, self.port)
         _safe_set(hardware.baud, self.baud)
         _safe_set(hardware.ni_device, self.ni_device)
@@ -196,7 +207,7 @@ class PressureHardwareSettings(Configurator):
     def from_state(cls, state: "VtState"):
         hardware = state.toolbar.pressure_device
         return cls(
-            device=hardware.device_type.get(),
+            device=cls._normalize_device_name(hardware.device_type.get()),
             port=hardware.port.get(),
             baud=hardware.baud.get(),
             ni_device=hardware.ni_device.get(),
@@ -292,16 +303,18 @@ class Config(Configurator):
         data = toml.load(path)
         if "pressure" not in data:
             servo_data = data.pop("servo", {}) or {}
-            pressure_device = "NI-DAQ" if servo_data.get("device") else "Arduino"
+            pressure_device = "NI-DAQ" if servo_data.get("device") else "VasoMotor"
             data["pressure"] = {
                 "device": pressure_device,
-                "port": "COM5" if pressure_device == "Arduino" else "",
+                "port": "COM5" if pressure_device in ("Arduino", "VasoMotor") else "",
                 "baud": 115_200,
                 "ni_device": servo_data.get("device", "Dev1"),
                 "ni_ao_channel": servo_data.get("ao_channel", "ao1"),
                 "ni_scale": 0.01,
             }
         result = dacite.from_dict(data_class=cls, data=data)
+        if isinstance(result.pressure, PressureHardwareSettings):
+            result.pressure.device = PressureHardwareSettings._normalize_device_name(result.pressure.device)
         result.path = str(path)
         return result
 

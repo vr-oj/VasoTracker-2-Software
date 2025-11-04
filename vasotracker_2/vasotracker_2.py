@@ -3498,7 +3498,7 @@ class ImageDimensionsPane(ToolbarPane):
 
 
 class PressureDevicePane(ToolbarPane):
-    DEVICE_OPTIONS = ["None", "Arduino", "NI-DAQ", "Sim"]
+    DEVICE_OPTIONS = ["None", "VasoMotor", "NI-DAQ", "Sim"]
 
     def __init__(self, parent, model_vars: VtState):
         super().__init__(parent, height=200, width=200)
@@ -3506,6 +3506,10 @@ class PressureDevicePane(ToolbarPane):
         self.parent = parent
         self.model_vars = model_vars
         settings = model_vars.toolbar.pressure_device
+
+        current_device = settings.device_type.get().strip().lower()
+        if current_device in ("arduino", "vasomoto"):
+            settings.device_type.set("VasoMotor")
 
         make_entry = make_entry_factory(self)
 
@@ -3533,7 +3537,7 @@ class PressureDevicePane(ToolbarPane):
         )
         self.device_menu.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
 
-        # Arduino specific fields
+        # VasoMotor specific fields
         ctk.CTkLabel(
             self, text="Port", font=(default_font, default_font_size)
         ).grid(row=2, column=0, sticky=tk.E, padx=2, pady=2)
@@ -3627,13 +3631,13 @@ class PressureDevicePane(ToolbarPane):
             padx=2,
             pady=(4, 0),
         )
-        self._set_port_hint("Click Detect to locate connected Arduino devices.")
+        self._set_port_hint("Click Detect to locate connected VasoMotor devices.")
 
         # Tooltips
         tooltip = ToolTip(self)
         tooltip.register(self.device_menu, "Select the active pressure hardware backend.")
-        tooltip.register(self.port_entry, "Serial port for the Arduino-based VasoMoto controller.")
-        tooltip.register(self.baud_entry, "Baud rate used by the Arduino sketch (default 115200).")
+        tooltip.register(self.port_entry, "Serial port for the VasoMotor pressure controller.")
+        tooltip.register(self.baud_entry, "Baud rate used by the VasoMotor sketch (default 115200).")
         tooltip.register(self.ni_device_entry, "NI-DAQ device name (e.g., Dev1).")
         tooltip.register(self.ni_ao_entry, "NI-DAQ analogue output channel (e.g., ao1).")
         tooltip.register(self.ni_scale_entry, "Voltage scaling factor for NI-DAQ outputs.")
@@ -3645,7 +3649,7 @@ class PressureDevicePane(ToolbarPane):
 
     def _apply_field_states(self) -> None:
         device = self.model_vars.toolbar.pressure_device.device_type.get().lower()
-        arduino_state = tk.NORMAL if device == "arduino" else tk.DISABLED
+        arduino_state = tk.NORMAL if device in ("arduino", "vasomotor", "vasomoto") else tk.DISABLED
         ni_state = tk.NORMAL if device in ("ni", "ni-daq", "nidaq") else tk.DISABLED
 
         def _safe_config(widget, **kwargs):
@@ -3661,7 +3665,7 @@ class PressureDevicePane(ToolbarPane):
         _safe_config(self.ni_device_entry, state=ni_state)
         _safe_config(self.ni_ao_entry, state=ni_state)
         _safe_config(self.ni_scale_entry, state=ni_state)
-        if device != "arduino":
+        if device not in ("arduino", "vasomotor", "vasomoto"):
             self._set_port_hint("")
 
     def _on_device_change(self, *args) -> None:
@@ -3676,7 +3680,7 @@ class PressureDevicePane(ToolbarPane):
             tmb.showinfo(
                 "NI-DAQ unavailable",
                 "niDAQmx is not installed, so NI-DAQ pressure control is disabled. "
-                "Install niDAQmx to use this option or select Arduino instead.",
+                "Install niDAQmx to use this option or select VasoMotor instead.",
             )
             self.model_vars.toolbar.pressure_device.device_type.set("None")
             self._apply_field_states()
@@ -3713,7 +3717,7 @@ class PressureDevicePane(ToolbarPane):
         ports = controller.list_serial_ports()
         if not ports:
             controller.notify_status(
-                "No serial devices detected. Connect the Arduino and click Detect again.",
+                "No serial devices detected. Connect the VasoMotor controller and click Detect again.",
                 persist=True,
             )
             self._set_port_hint("Detected ports: none")
@@ -3731,7 +3735,7 @@ class PressureDevicePane(ToolbarPane):
 
     @staticmethod
     def _pick_preferred_port(ports: List[Tuple[str, str]]) -> Optional[str]:
-        keywords = ("vasomoto", "arduino", "usb", "serial", "cu.", "tty", "com")
+        keywords = ("vasomotor", "vasomoto", "arduino", "usb", "serial", "cu.", "tty", "com")
         for device, description in ports:
             text = f"{device} {description}".lower()
             if any(keyword in text for keyword in keywords):

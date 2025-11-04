@@ -241,7 +241,7 @@ class PressureController:
 
         device_type = str(settings.device_type.get() if hasattr(settings, "device_type") else "").strip().lower()
 
-        if device_type in ("arduino", "vasomoto"):
+        if device_type in ("arduino", "vasomoto", "vasomotor"):
             port = getattr(settings, "port", None)
             baud = getattr(settings, "baud", None)
             try:
@@ -328,7 +328,7 @@ class PressureController:
         if not discovered and auto_detect:
             self._set_device(NullPressureDevice(), "none")
             self._notify_status(
-                "No serial ports detected. Connect the Arduino and try again.",
+                "No serial ports detected. Connect the VasoMotor controller and try again.",
                 persist=True,
             )
             return
@@ -354,7 +354,7 @@ class PressureController:
             last_status["event"] = event
 
             if event == "connecting":
-                self._notify_status_async(f"Connecting to Arduino on {port_name}...", log=False)
+                self._notify_status_async(f"Connecting to VasoMotor on {port_name}...", log=False)
             elif event == "open":
                 self._notify_status_async(f"Serial port {port_name} opened.", log=False)
                 actual_port = info.get("port")
@@ -362,34 +362,34 @@ class PressureController:
                     update_port_variable(actual_port)
             elif event == "syncing":
                 self._notify_status_async(
-                    f"Waiting for Arduino telemetry ({port_name})...", log=False
+                    f"Waiting for VasoMotor telemetry ({port_name})...", log=False
                 )
             elif event == "healthy":
                 hz = info.get("rx_hz")
                 if hz:
                     self._notify_status_async(
-                        f"Arduino telemetry active ({hz:.1f} Hz).",
+                        f"VasoMotor telemetry active ({hz:.1f} Hz).",
                         log=False,
                     )
                 else:
-                    self._notify_status_async("Arduino telemetry active.", log=False)
+                    self._notify_status_async("VasoMotor telemetry active.", log=False)
             elif event == "stale":
                 age = info.get("age")
                 if age:
                     self._notify_status_async(
-                        f"Arduino telemetry stale ({age:.1f}s gap).",
+                        f"VasoMotor telemetry stale ({age:.1f}s gap).",
                         log=False,
                     )
                 else:
-                    self._notify_status_async("Arduino telemetry stale.", log=False)
+                    self._notify_status_async("VasoMotor telemetry stale.", log=False)
             elif event == "error":
                 message = info.get("message") or "Unknown error"
                 self._notify_status_async(
-                    f"Arduino error on {port_name}: {message}",
+                    f"VasoMotor error on {port_name}: {message}",
                     persist=True,
                 )
             elif event == "closed":
-                self._notify_status_async(f"Arduino connection closed ({port_name}).", log=False)
+                self._notify_status_async(f"VasoMotor connection closed ({port_name}).", log=False)
 
         worker = ArduinoSerialWorker(
             port=None if auto_detect else requested,
@@ -399,7 +399,7 @@ class PressureController:
             status_callback=status_callback,
         )
         device.bind_worker(worker)
-        self._set_device(device, "arduino", worker=worker, monitor=monitor)
+        self._set_device(device, "vasomotor", worker=worker, monitor=monitor)
 
         if not discovered and not auto_detect:
             self._notify_status_async(
@@ -412,10 +412,10 @@ class PressureController:
                 device.start()
             except Exception as exc:
                 self._notify_status_async(
-                    f"Failed to start Arduino telemetry: {self._summarise_exception(exc)}",
+                    f"Failed to start VasoMotor telemetry: {self._summarise_exception(exc)}",
                     persist=True,
                 )
-                print("Failed to start Arduino pressure device:", exc)
+                print("Failed to start VasoMotor pressure device:", exc)
 
     def _setup_nidaq_device(self, settings) -> PressureDevice:
         if not is_pydaqmx_available():
@@ -578,7 +578,7 @@ class PressureController:
         return str(self._device_ctx.type_name or "").lower()
 
     def link_monitor(self) -> Optional[LinkMonitor]:
-        """Expose the Arduino link monitor (if available) for UI badges."""
+        """Expose the VasoMotor link monitor (if available) for UI badges."""
         return self._device_ctx.monitor
 
     # ------------------------------------------------------------------

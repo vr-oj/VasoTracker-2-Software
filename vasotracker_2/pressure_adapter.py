@@ -25,7 +25,7 @@ try:
     from serial.tools import list_ports  # type: ignore[import]
 except ImportError as exc:  # pragma: no cover - runtime dependency
     raise ImportError(
-        "pyserial is required for Arduino communication. Install with `pip install pyserial`."
+        "pyserial is required for VasoMotor communication. Install with `pip install pyserial`."
     ) from exc
 
 try:  # Optional dependency; only used for busy-port diagnostics.
