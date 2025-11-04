@@ -28,9 +28,9 @@ from .VT_Arduino import Arduino
 from .arduino_async_worker import ArduinoSerialWorker
 from .arduino_link_monitor import LinkMonitor
 try:
-    from ..setpoint_bus import notify_setpoint
+    from ..setpoint_bus import notify_setpoint, broadcast_setpoint
 except ImportError:
-    from setpoint_bus import notify_setpoint
+    from setpoint_bus import notify_setpoint, broadcast_setpoint
 
 
 def is_pydaqmx_available() -> bool:
@@ -95,6 +95,7 @@ class PressureController:
         self.last_update_time: Optional[float] = None
         self.update_threshold: float = 1.0
         self.set_pressure: float = 0.0
+        self._last_broadcast_device_sp: Optional[float] = None
         self._status_reset_job: Optional[str] = None
         self._default_status_text = self._capture_status_text()
 
@@ -558,6 +559,16 @@ class PressureController:
                     data_acq_device_var = getattr(tb.data_acq, "device_set_pressure", None)
                     if data_acq_device_var is not None:
                         self._set_var_safe(data_acq_device_var, device_formatted)
+                    self.set_pressure = numeric_sp
+                    if (
+                        self._last_broadcast_device_sp is None
+                        or abs(numeric_sp - self._last_broadcast_device_sp) > 1e-3
+                    ):
+                        try:
+                            broadcast_setpoint(numeric_sp, "device")
+                        except Exception:
+                            pass
+                        self._last_broadcast_device_sp = numeric_sp
 
     def get_latest(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         return self._latest
