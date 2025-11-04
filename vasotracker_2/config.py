@@ -42,6 +42,7 @@ class Configurator:
 
 @dataclass
 class AcquisitionSettings(Configurator):
+    camera: str = ""
     pixel_world_scale: float = 1.0
     exposure: int = 50
     pixel_clock: int = 10
@@ -51,6 +52,8 @@ class AcquisitionSettings(Configurator):
 
     def set_values(self, state: "VtState"):
         acq = state.toolbar.acq
+        if self.camera:
+            _safe_set(acq.camera, self.camera)
         _safe_set(acq.scale, self.pixel_world_scale)
         _safe_set(acq.exposure, self.exposure)
         _safe_set(acq.pixel_clock, self.pixel_clock)
@@ -59,11 +62,17 @@ class AcquisitionSettings(Configurator):
     @classmethod
     def from_state(cls, state: "VtState"):
         acq = state.toolbar.acq
+        camera = ""
+        try:
+            camera = acq.camera.get()
+        except Exception:
+            camera = ""
         scale = acq.scale.get()
         exposure = acq.exposure.get()
         pixel_clock = acq.pixel_clock.get()
         recording_interval = acq.rec_interval.get()
         return cls(
+            camera=camera,
             pixel_world_scale=scale,
             exposure=exposure,
             pixel_clock=pixel_clock,

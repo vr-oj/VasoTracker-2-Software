@@ -2729,9 +2729,18 @@ class AcquisitionSettingsPane(ToolbarPane):
 
         self.camera_options = ["..."] + list(Camera.registry.keys())
 
+        current_camera = ""
+        try:
+            current_camera = sv.camera.get()
+        except Exception:
+            sv.camera = tk.StringVar()
+            current_camera = ""
 
-        sv.camera = tk.StringVar()  # Assuming sv.camera is a StringVar
-        sv.camera.set(self.camera_options[0])  # Set the default value
+        if not current_camera:
+            current_camera = self.camera_options[0]
+            sv.camera.set(current_camera)
+        elif current_camera not in self.camera_options:
+            self.camera_options.append(current_camera)
 
         # Calculate the length of the longest string in camera_options
         max_length = max(len(option) for option in self.camera_options)
@@ -2741,7 +2750,14 @@ class AcquisitionSettingsPane(ToolbarPane):
         padx=(0,10)
 
         ctk.CTkLabel(self, text="Camera:", font=(default_font, default_font_size)).grid(row=1, column=0, padx=padx, sticky=tk.E)
-        self.camera_entry = ttk.OptionMenu(self, sv.camera, *self.camera_options, command=self.set_camera_callback)
+        default_option = current_camera if current_camera in self.camera_options else self.camera_options[0]
+        self.camera_entry = ttk.OptionMenu(
+            self,
+            sv.camera,
+            default_option,
+            *self.camera_options,
+            command=self.set_camera_callback,
+        )
 
         self.camera_entry.grid(row=1, column=1, sticky=tk.EW)
 
@@ -5547,6 +5563,7 @@ class Controller:
             self.pressure_controller.configure_from_state(start_immediately=True)
             self.pressure_controller.start()
 
+        self.set_camera()
 
         self.bind_buttons()
         self.bind_checkboxes()
@@ -5766,7 +5783,11 @@ class Controller:
         print("setting the camera...")
         if cam_name is None:
             cam_name = self.model.state.toolbar.acq.camera.get()
-        
+        if not cam_name or cam_name == ELLIPSIS:
+            return
+        if cam_name not in Camera.registry and cam_name.lower() != "image from file":
+            print(f"Camera '{cam_name}' not in registry; skipping hardware switch.")
+            return
         print("Camera name:", cam_name)
         self.model.set_camera(cam_name)
 
@@ -6141,6 +6162,17 @@ class Controller:
             )
             self.view.shutdown_app(force=True)
             return False
+        controller = self.pressure_controller
+        if controller is not None:
+            try:
+                controller.configure_from_state(start_immediately=True)
+                controller.start()
+            except Exception as exc:
+                print("Failed to reconfigure pressure controller after loading settings:", exc)
+        try:
+            self.set_camera()
+        except Exception as exc:
+            print("Failed to apply camera selection from settings:", exc)
         return True
 
     def menu_load_settings(self):
