@@ -3182,6 +3182,13 @@ class GraphSettingsPane(ToolbarPane):
             values=metric_options,
             width=graphaxes_entry_width + 30,
             command=lambda *_: self._on_metric_change(),
+            fg_color="white",
+            button_color="#E0E7EF",
+            button_hover_color="#D0D9E5",
+            dropdown_fg_color="white",
+            dropdown_hover_color="#E0E7EF",
+            dropdown_text_color=entry_text_color,
+            text_color=entry_text_color,
         )
         self.axis1_metric_menu.grid(row=5, column=1, columnspan=2, padx=padx, pady=pady, sticky="ew")
 
@@ -3191,6 +3198,13 @@ class GraphSettingsPane(ToolbarPane):
             values=metric_options,
             width=graphaxes_entry_width + 30,
             command=lambda *_: self._on_metric_change(),
+            fg_color="white",
+            button_color="#E0E7EF",
+            button_hover_color="#D0D9E5",
+            dropdown_fg_color="white",
+            dropdown_hover_color="#E0E7EF",
+            dropdown_text_color=entry_text_color,
+            text_color=entry_text_color,
         )
         self.axis2_metric_menu.grid(row=6, column=1, columnspan=2, padx=padx, pady=pady, sticky="ew")
 
@@ -3583,6 +3597,13 @@ class PressureDevicePane(ToolbarPane):
             variable=settings.device_type,
             values=self.DEVICE_OPTIONS,
             width=150,
+            fg_color="white",
+            button_color="#E0E7EF",
+            button_hover_color="#D0D9E5",
+            dropdown_fg_color="white",
+            dropdown_hover_color="#E0E7EF",
+            dropdown_text_color=entry_text_color,
+            text_color=entry_text_color,
         )
         self.device_menu.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
 
