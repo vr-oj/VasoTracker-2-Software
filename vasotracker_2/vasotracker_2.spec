@@ -19,10 +19,10 @@ added_files = [("music", "music"), ("images", "images"), ("SampleData2", "Sample
 
 a = Analysis(
     ['vasotracker_2.py'],
-    pathex=[],
+    pathex=[spec_dir],
     binaries=[],
     datas=added_files,
-    hiddenimports=['PyDAQmx', 'scipy'],
+    hiddenimports=['PyDAQmx', 'scipy', 'version'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[os.path.join(spec_dir, "pyinstaller_hooks", "filter_pkg_resources_warning.py")],

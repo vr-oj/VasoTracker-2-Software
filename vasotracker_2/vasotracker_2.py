@@ -123,6 +123,7 @@ from cameras import Camera, CameraBase
 from config import AcquisitionSettings, Config, GraphAxisSettings
 import customtkinter as ctk
 import sv_ttk
+from customtkinter.windows.widgets import ctk_entry
 
 
 # Conditional imports with user notification for optional dependencies
@@ -163,6 +164,17 @@ entry_text_color="#0B2533"
 entry_placeholder_color="#3F4E5F"
 button_enabled_color="white"
 muted_text_color="#1F2A35"
+
+# Monkey-patch CTkEntry callback to tolerate empty/non-numeric Tk variable states.
+_orig_ctkentry_callback = getattr(ctk_entry.CTkEntry, "_textvariable_callback", None)
+def _safe_ctkentry_callback(self, *args, **kwargs):
+    try:
+        if _orig_ctkentry_callback is not None:
+            return _orig_ctkentry_callback(self, *args, **kwargs)
+    except TclError:
+        # Ignore transient empty-string states on numeric Tk variables.
+        return None
+ctk_entry.CTkEntry._textvariable_callback = _safe_ctkentry_callback
 
 # The following is so that the required resources are included in the PyInstaller build.
 # Utility functions
