@@ -29,7 +29,7 @@ class ArduinoSerialWorker:
     """
 
     DEFAULT_WRITE_QUEUE = 256
-    PRIORITY_HINTS = ("vasomotor", "vasomoto", "arduino", "ch340", "usb serial", "ftdi", "silicon labs")
+    PRIORITY_HINTS = ("vasomoto", "arduino", "ch340", "usb serial", "ftdi", "silicon labs")
 
     def __init__(
         self,

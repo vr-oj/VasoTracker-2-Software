@@ -196,7 +196,7 @@ class PressureHardwareSettings(Configurator):
         lowered = name.strip().lower()
         if lowered == "arduino":
             return "VasoMoto"
-        if lowered in ("vasomotor", "vasomoto"):
+        if lowered in ("vasomoto",):
             return "VasoMoto"
         return name
 

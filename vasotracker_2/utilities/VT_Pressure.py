@@ -243,7 +243,7 @@ class PressureController:
 
         device_type = str(settings.device_type.get() if hasattr(settings, "device_type") else "").strip().lower()
 
-        if device_type in ("arduino", "vasomoto", "vasomotor"):
+        if device_type in ("arduino", "vasomoto"):
             port = getattr(settings, "port", None)
             baud = getattr(settings, "baud", None)
             try:
@@ -401,7 +401,7 @@ class PressureController:
             status_callback=status_callback,
         )
         device.bind_worker(worker)
-        self._set_device(device, "vasomotor", worker=worker, monitor=monitor)
+        self._set_device(device, "vasomoto", worker=worker, monitor=monitor)
 
         if not discovered and not auto_detect:
             self._notify_status_async(

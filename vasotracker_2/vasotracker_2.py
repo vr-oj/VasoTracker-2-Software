@@ -3702,7 +3702,7 @@ class PressureDevicePane(ToolbarPane):
 
     def _apply_field_states(self) -> None:
         device = self.model_vars.toolbar.pressure_device.device_type.get().lower()
-        arduino_state = tk.NORMAL if device in ("arduino", "vasomotor", "vasomoto") else tk.DISABLED
+        arduino_state = tk.NORMAL if device in ("arduino", "vasomoto") else tk.DISABLED
         ni_state = tk.NORMAL if device in ("ni", "ni-daq", "nidaq") else tk.DISABLED
 
         def _safe_config(widget, **kwargs):
@@ -3718,7 +3718,7 @@ class PressureDevicePane(ToolbarPane):
         _safe_config(self.ni_device_entry, state=ni_state)
         _safe_config(self.ni_ao_entry, state=ni_state)
         _safe_config(self.ni_scale_entry, state=ni_state)
-        if device not in ("arduino", "vasomotor", "vasomoto"):
+        if device not in ("arduino", "vasomoto"):
             self._set_port_hint("")
 
     def _on_device_change(self, *args) -> None:
@@ -3788,7 +3788,7 @@ class PressureDevicePane(ToolbarPane):
 
     @staticmethod
     def _pick_preferred_port(ports: List[Tuple[str, str]]) -> Optional[str]:
-        keywords = ("vasomotor", "vasomoto", "arduino", "usb", "serial", "cu.", "tty", "com")
+        keywords = ("vasomoto", "arduino", "usb", "serial", "cu.", "tty", "com")
         for device, description in ports:
             text = f"{device} {description}".lower()
             if any(keyword in text for keyword in keywords):

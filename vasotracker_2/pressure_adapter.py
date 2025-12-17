@@ -33,7 +33,7 @@ try:  # Optional dependency; only used for busy-port diagnostics.
 except ImportError:  # pragma: no cover - psutil is optional
     psutil = None
 
-from .vasomotor_port import VasoMotoPort
+from .vasomoto_port import VasoMotoPort
 
 
 @dataclass
@@ -133,7 +133,7 @@ class PressureAdapter:
                 try:
                     self._vm_port = self._open_port(device)
                     self.port = device
-                    self.protocol = "vasomotor"
+                    self.protocol = "vasomoto"
                     self._start_reader()
                     self._start_keepalive()
                     return
