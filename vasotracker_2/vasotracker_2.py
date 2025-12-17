@@ -4018,6 +4018,24 @@ class PressureControlPane(ToolbarPane):
         self.hold_button.configure(state=tk.NORMAL)
         self.next_button.configure(state=tk.NORMAL)
 
+    def _refresh_hold_button(self) -> None:
+        """Update hold button color based on current hold state."""
+        try:
+            active = bool(self.model_vars.toolbar.pressure_protocol.hold_step.get())
+        except Exception:
+            active = False
+        try:
+            state = self.hold_button.cget("state")
+        except Exception:
+            return
+        colour = entry_disabled_color
+        if state != tk.DISABLED:
+            colour = "#f39c12" if active else button_enabled_color
+        try:
+            self.hold_button.configure(fg_color=colour)
+        except Exception:
+            pass
+
     def _request_device_refresh(self) -> None:
         if not request_setpoint_refresh():
             controller = getattr(self.model_vars, "pressure_controller", None)
