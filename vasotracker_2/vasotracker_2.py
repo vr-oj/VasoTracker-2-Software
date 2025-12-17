@@ -3290,22 +3290,6 @@ class CaliperROIPane(ToolbarPane):
         tk_image = ctk.CTkImage(resized_image, size=(width, height))  # Ensure proper scaling
         return tk_image
 
-    def _refresh_hold_button(self) -> None:
-        try:
-            active = bool(self.model_vars.toolbar.pressure_protocol.hold_step.get())
-        except Exception:
-            active = False
-        try:
-            state = self.hold_button.cget("state")
-        except Exception:
-            return
-        colour = entry_disabled_color
-        if state != tk.DISABLED:
-            colour = "#f39c12" if active else button_enabled_color
-        try:
-            self.hold_button.configure(fg_color=colour)
-        except Exception:
-            pass
 
 class PlottingPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
