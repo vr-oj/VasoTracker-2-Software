@@ -98,6 +98,8 @@ class PressureController:
         self._last_broadcast_device_sp: Optional[float] = None
         self._status_reset_job: Optional[str] = None
         self._default_status_text = self._capture_status_text()
+        self._hold_step_pending: bool = False
+        self._hold_step_active: bool = False
 
         # Configure from persisted settings
         self.configure_from_state(start_immediately=False)
@@ -328,7 +330,7 @@ class PressureController:
         if not discovered and auto_detect:
             self._set_device(NullPressureDevice(), "none")
             self._notify_status(
-                "No serial ports detected. Connect the VasoMotor controller and try again.",
+                "No serial ports detected. Connect the VasoMoto controller and try again.",
                 persist=True,
             )
             return
@@ -354,7 +356,7 @@ class PressureController:
             last_status["event"] = event
 
             if event == "connecting":
-                self._notify_status_async(f"Connecting to VasoMotor on {port_name}...", log=False)
+                self._notify_status_async(f"Connecting to VasoMoto on {port_name}...", log=False)
             elif event == "open":
                 self._notify_status_async(f"Serial port {port_name} opened.", log=False)
                 actual_port = info.get("port")
@@ -362,34 +364,34 @@ class PressureController:
                     update_port_variable(actual_port)
             elif event == "syncing":
                 self._notify_status_async(
-                    f"Waiting for VasoMotor telemetry ({port_name})...", log=False
+                    f"Waiting for VasoMoto telemetry ({port_name})...", log=False
                 )
             elif event == "healthy":
                 hz = info.get("rx_hz")
                 if hz:
                     self._notify_status_async(
-                        f"VasoMotor telemetry active ({hz:.1f} Hz).",
+                        f"VasoMoto telemetry active ({hz:.1f} Hz).",
                         log=False,
                     )
                 else:
-                    self._notify_status_async("VasoMotor telemetry active.", log=False)
+                    self._notify_status_async("VasoMoto telemetry active.", log=False)
             elif event == "stale":
                 age = info.get("age")
                 if age:
                     self._notify_status_async(
-                        f"VasoMotor telemetry stale ({age:.1f}s gap).",
+                        f"VasoMoto telemetry stale ({age:.1f}s gap).",
                         log=False,
                     )
                 else:
-                    self._notify_status_async("VasoMotor telemetry stale.", log=False)
+                    self._notify_status_async("VasoMoto telemetry stale.", log=False)
             elif event == "error":
                 message = info.get("message") or "Unknown error"
                 self._notify_status_async(
-                    f"VasoMotor error on {port_name}: {message}",
+                    f"VasoMoto error on {port_name}: {message}",
                     persist=True,
                 )
             elif event == "closed":
-                self._notify_status_async(f"VasoMotor connection closed ({port_name}).", log=False)
+                self._notify_status_async(f"VasoMoto connection closed ({port_name}).", log=False)
 
         worker = ArduinoSerialWorker(
             port=None if auto_detect else requested,
@@ -412,10 +414,10 @@ class PressureController:
                 device.start()
             except Exception as exc:
                 self._notify_status_async(
-                    f"Failed to start VasoMotor telemetry: {self._summarise_exception(exc)}",
+                    f"Failed to start VasoMoto telemetry: {self._summarise_exception(exc)}",
                     persist=True,
                 )
-                print("Failed to start VasoMotor pressure device:", exc)
+                print("Failed to start VasoMoto pressure device:", exc)
 
     def _setup_nidaq_device(self, settings) -> PressureDevice:
         if not is_pydaqmx_available():
@@ -578,7 +580,7 @@ class PressureController:
         return str(self._device_ctx.type_name or "").lower()
 
     def link_monitor(self) -> Optional[LinkMonitor]:
-        """Expose the VasoMotor link monitor (if available) for UI badges."""
+        """Expose the VasoMoto link monitor (if available) for UI badges."""
         return self._device_ctx.monitor
 
     # ------------------------------------------------------------------
@@ -613,11 +615,19 @@ class PressureController:
         time_to_update_secs = (
             self.multiplier * self.pressure_time_interval - int(elapsed_seconds)
         )
-        self.model.state.toolbar.data_acq.countdown.set(
-            str(timedelta(seconds=max(time_to_update_secs, 0)))
-        )
+        if self._hold_step_active:
+            self.model.state.toolbar.data_acq.countdown.set("Hold")
+        else:
+            self.model.state.toolbar.data_acq.countdown.set(
+                str(timedelta(seconds=max(time_to_update_secs, 0)))
+            )
 
         if elapsed_seconds >= self.next_pressure_update_time:
+            if self._hold_step_pending or self._hold_step_active:
+                self._hold_step_active = True
+                self._hold_step_pending = False
+                self._set_var_safe(self.model.state.toolbar.pressure_protocol.hold_step, True)
+                return
             self.update_pressure()
             self.next_pressure_update_time += self.pressure_time_interval
 
@@ -633,6 +643,9 @@ class PressureController:
         self.next_pressure_update_time = self.pressure_time_interval
         self.multiplier = 1
         self.protocol_completed = False
+        self._hold_step_pending = False
+        self._hold_step_active = False
+        self._set_var_safe(self.model.state.toolbar.pressure_protocol.hold_step, False)
         if self.stop_pressure > self.start_pressure:
             self._direction = 1
         elif self.stop_pressure < self.start_pressure:
@@ -697,9 +710,35 @@ class PressureController:
         self.multiplier = 1
         self.next_pressure_update_time = 0
         self.protocol_completed = False
+        self._hold_step_pending = False
+        self._hold_step_active = False
+        self._set_var_safe(self.model.state.toolbar.pressure_protocol.hold_step, False)
         if self.stop_pressure > self.start_pressure:
             self._direction = 1
         elif self.stop_pressure < self.start_pressure:
             self._direction = -1
         else:
             self._direction = 0
+
+    def hold_current_step(self) -> None:
+        """Pause at the end of the current interval and hold the present pressure."""
+        if self.pressure_time_interval is None:
+            return
+        if self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.get() != 1:
+            return
+        self._hold_step_pending = True
+        self._set_var_safe(self.model.state.toolbar.pressure_protocol.hold_step, True)
+
+    def advance_to_next_step(self) -> None:
+        """Resume from a held step and move immediately to the next pressure target."""
+        if self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.get() != 1:
+            return
+        if self.pressure_start_time is None:
+            return
+        self._hold_step_pending = False
+        self._hold_step_active = False
+        self._set_var_safe(self.model.state.toolbar.pressure_protocol.hold_step, False)
+        self.update_pressure()
+        if not self.protocol_completed:
+            elapsed = time.time() - self.pressure_start_time
+            self.next_pressure_update_time = elapsed + self.pressure_time_interval

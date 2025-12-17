@@ -424,6 +424,8 @@ class GraphPaneState:
     y_max_od: IntVar = field(default_factory=IntVar)
     y_min_id: IntVar = field(default_factory=IntVar)
     y_max_id: IntVar = field(default_factory=IntVar)
+    axis1_metric: StringVar = field(default_factory=lambda: StringVar(value="Outer diameter"))
+    axis2_metric: StringVar = field(default_factory=lambda: StringVar(value="Inner diameter"))
     dirty: BooleanVar = field(default_factory=BooleanVar)
     limits_dirty: BooleanVar = field(default_factory=BooleanVar)
 
@@ -503,6 +505,7 @@ class PressureProtocolSettingsState:
     set_pressure: StringVar = field(default_factory=lambda: StringVar(value="0"))
     pressure_increment: IntVar = field(default_factory=IntVar)
     hold_pressure: BooleanVar = field(default_factory=BooleanVar)
+    hold_step: BooleanVar = field(default_factory=BooleanVar)
     device_set_pressure: StringVar = field(default_factory=lambda: StringVar(value="0.0"))
     device_set_source: StringVar = field(default_factory=lambda: StringVar(value="init"))
 
@@ -577,6 +580,7 @@ class LineData:
 class GraphState:
     od_avg: LineData = field(default_factory=LineData)
     id_avg: LineData = field(default_factory=LineData)
+    pressure_avg: LineData = field(default_factory=LineData)
     markers: LineData = field(default_factory=LineData)
     od_lines: List[LineData] = field(
         default_factory=lambda: [LineData() for _ in range(NUM_LINES)]
@@ -1853,6 +1857,8 @@ class Model:
             graph.od_avg.y = od_ordinates
             graph.id_avg.x = new_x
             graph.id_avg.y = id_ordinates
+            graph.pressure_avg.x = new_x
+            graph.pressure_avg.y = np.asarray(measure.avg_pressure[-max_pts:])
             graph.markers.x = new_x
             graph.markers.y = marker_ordinates
 
@@ -3085,6 +3091,8 @@ class GraphSettingsPane(ToolbarPane):
         ctk.CTkLabel(self, text="Time:", font=(default_font, default_font_size)).grid(row=2, column=0, sticky=tk.E, padx=padx, pady=pady)
         ctk.CTkLabel(self, text="OD:", font=(default_font, default_font_size)).grid(row=3, column=0, sticky=tk.E, padx=padx, pady=pady)
         ctk.CTkLabel(self, text="ID:", font=(default_font, default_font_size)).grid(row=4, column=0, sticky=tk.E, padx=padx, pady=pady)
+        ctk.CTkLabel(self, text="Left trace:", font=(default_font, default_font_size)).grid(row=5, column=0, sticky=tk.E, padx=padx, pady=pady)
+        ctk.CTkLabel(self, text="Right trace:", font=(default_font, default_font_size)).grid(row=6, column=0, sticky=tk.E, padx=padx, pady=pady)
 
         graphaxes_entry_width = 75
 
@@ -3155,10 +3163,38 @@ class GraphSettingsPane(ToolbarPane):
             padx=padx,
             pady=pady
         )
+        metric_options = ["Outer diameter", "Inner diameter", "Avg pressure"]
+        self.axis1_metric_menu = ctk.CTkOptionMenu(
+            self,
+            variable=sv.axis1_metric,
+            values=metric_options,
+            width=graphaxes_entry_width + 30,
+            command=lambda *_: self._on_metric_change(),
+        )
+        self.axis1_metric_menu.grid(row=5, column=1, columnspan=2, padx=padx, pady=pady, sticky="ew")
+
+        self.axis2_metric_menu = ctk.CTkOptionMenu(
+            self,
+            variable=sv.axis2_metric,
+            values=metric_options,
+            width=graphaxes_entry_width + 30,
+            command=lambda *_: self._on_metric_change(),
+        )
+        self.axis2_metric_menu.grid(row=6, column=1, columnspan=2, padx=padx, pady=pady, sticky="ew")
+
         self.set_button = ctk.CTkButton(self, width=70, text="Set", font=(default_font, default_font_size),text_color="black")
-        self.set_button.grid(row=6, column=1, padx=padx, pady=pady)
+        self.set_button.grid(row=7, column=1, padx=padx, pady=pady)
         self.default_button = ctk.CTkButton(self, width=70, text="Default", font=(default_font, default_font_size), text_color="black")
-        self.default_button.grid(row=6, column=2, padx=padx, pady=pady)
+        self.default_button.grid(row=7, column=2, padx=padx, pady=pady)
+
+        sv.axis1_metric.trace_add("write", lambda *args: self._on_metric_change())
+        sv.axis2_metric.trace_add("write", lambda *args: self._on_metric_change())
+
+    def _on_metric_change(self):
+        try:
+            self.model_vars.graph.dirty.set(True)
+        except Exception:
+            pass
 
 
 class CaliperROIPane(ToolbarPane):
@@ -3253,6 +3289,23 @@ class CaliperROIPane(ToolbarPane):
         resized_image = img.resize((width, height), Image.LANCZOS)
         tk_image = ctk.CTkImage(resized_image, size=(width, height))  # Ensure proper scaling
         return tk_image
+
+    def _refresh_hold_button(self) -> None:
+        try:
+            active = bool(self.model_vars.toolbar.pressure_protocol.hold_step.get())
+        except Exception:
+            active = False
+        try:
+            state = self.hold_button.cget("state")
+        except Exception:
+            return
+        colour = entry_disabled_color
+        if state != tk.DISABLED:
+            colour = "#f39c12" if active else button_enabled_color
+        try:
+            self.hold_button.configure(fg_color=colour)
+        except Exception:
+            pass
 
 class PlottingPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
@@ -3498,7 +3551,7 @@ class ImageDimensionsPane(ToolbarPane):
 
 
 class PressureDevicePane(ToolbarPane):
-    DEVICE_OPTIONS = ["None", "VasoMotor", "NI-DAQ", "Sim"]
+    DEVICE_OPTIONS = ["None", "VasoMoto", "NI-DAQ", "Sim"]
 
     def __init__(self, parent, model_vars: VtState):
         super().__init__(parent, height=200, width=200)
@@ -3509,7 +3562,7 @@ class PressureDevicePane(ToolbarPane):
 
         current_device = settings.device_type.get().strip().lower()
         if current_device in ("arduino", "vasomoto"):
-            settings.device_type.set("VasoMotor")
+            settings.device_type.set("VasoMoto")
 
         make_entry = make_entry_factory(self)
 
@@ -3537,7 +3590,7 @@ class PressureDevicePane(ToolbarPane):
         )
         self.device_menu.grid(row=1, column=1, sticky=tk.W, padx=2, pady=2)
 
-        # VasoMotor specific fields
+        # VasoMoto specific fields
         ctk.CTkLabel(
             self, text="Port", font=(default_font, default_font_size)
         ).grid(row=2, column=0, sticky=tk.E, padx=2, pady=2)
@@ -3631,13 +3684,13 @@ class PressureDevicePane(ToolbarPane):
             padx=2,
             pady=(4, 0),
         )
-        self._set_port_hint("Click Detect to locate connected VasoMotor devices.")
+        self._set_port_hint("Click Detect to locate connected VasoMoto devices.")
 
         # Tooltips
         tooltip = ToolTip(self)
         tooltip.register(self.device_menu, "Select the active pressure hardware backend.")
-        tooltip.register(self.port_entry, "Serial port for the VasoMotor pressure controller.")
-        tooltip.register(self.baud_entry, "Baud rate used by the VasoMotor sketch (default 115200).")
+        tooltip.register(self.port_entry, "Serial port for the VasoMoto pressure controller.")
+        tooltip.register(self.baud_entry, "Baud rate used by the VasoMoto sketch (default 115200).")
         tooltip.register(self.ni_device_entry, "NI-DAQ device name (e.g., Dev1).")
         tooltip.register(self.ni_ao_entry, "NI-DAQ analogue output channel (e.g., ao1).")
         tooltip.register(self.ni_scale_entry, "Voltage scaling factor for NI-DAQ outputs.")
@@ -3680,7 +3733,7 @@ class PressureDevicePane(ToolbarPane):
             tmb.showinfo(
                 "NI-DAQ unavailable",
                 "niDAQmx is not installed, so NI-DAQ pressure control is disabled. "
-                "Install niDAQmx to use this option or select VasoMotor instead.",
+                "Install niDAQmx to use this option or select VasoMoto instead.",
             )
             self.model_vars.toolbar.pressure_device.device_type.set("None")
             self._apply_field_states()
@@ -3717,7 +3770,7 @@ class PressureDevicePane(ToolbarPane):
         ports = controller.list_serial_ports()
         if not ports:
             controller.notify_status(
-                "No serial devices detected. Connect the VasoMotor controller and click Detect again.",
+                "No serial devices detected. Connect the VasoMoto controller and click Detect again.",
                 persist=True,
             )
             self._set_port_hint("Detected ports: none")
@@ -3781,12 +3834,18 @@ class PressureControlPane(ToolbarPane):
         self.start_protocol_button.grid(row=1, column=2, padx=padx, pady=(8,0))
         self.start_protocol_button.image = self.pressure_start_img  # Keep a reference
 
+        self.hold_button = ctk.CTkButton(self, text="Hold", height=BUTTON_HEIGHT, width=60, state=tk.DISABLED, fg_color=entry_disabled_color)
+        self.hold_button.grid(row=1, column=3, padx=padx, pady=(8, 0))
+
+        self.next_button = ctk.CTkButton(self, text="Next", height=BUTTON_HEIGHT, width=60, state=tk.DISABLED, fg_color=entry_disabled_color)
+        self.next_button.grid(row=1, column=4, padx=padx, pady=(8, 0))
+
         self.pressure_stop_img = self.resize_img(os.path.join(images_folder, 'Pressure Step Button.png'),  BUTTON_WIDTH, BUTTON_HEIGHT)
         self.pressure_stop_img.image = self.pressure_stop_img  # Keep a reference
 
         self.set_pressure_img = self.resize_img(os.path.join(images_folder, 'Pressure Start Button-01.png'),  BUTTON_WIDTH, BUTTON_HEIGHT)
         self.set_pressure_button = ctk.CTkButton(self, image=self.set_pressure_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH, fg_color="#BDC3C7", state=tk.DISABLED)
-        self.set_pressure_button.grid(row=1, column=3, padx=padx, pady=(8,0))
+        self.set_pressure_button.grid(row=1, column=5, padx=padx, pady=(8,0))
         self.set_pressure_button.image = self.set_pressure_img  # Keep a reference
 
         self._colour_neutral = "#B0BEC5"
@@ -3802,6 +3861,7 @@ class PressureControlPane(ToolbarPane):
 
         self._recent_events = deque(maxlen=5)
         self._debug_visible = False
+        sv.hold_step.trace_add("write", lambda *args: self._refresh_hold_button())
 
         self.device_set_label = None
         self.debug_overlay = ctk.CTkLabel(
@@ -3811,11 +3871,11 @@ class PressureControlPane(ToolbarPane):
             font=(default_font, default_font_size - 2),
             text_color=self._colour_neutral,
         )
-        self.debug_overlay.grid(row=7, column=0, columnspan=4, sticky=tk.W, padx=padx, pady=(4, 0))
+        self.debug_overlay.grid(row=7, column=0, columnspan=6, sticky=tk.W, padx=padx, pady=(4, 0))
         self.debug_overlay.grid_remove()
 
 
-        ctk.CTkLabel(self, text="Manual control:", font=(default_font, default_font_size)).grid(row=2, column=0, columnspan=4, sticky=tk.W)
+        ctk.CTkLabel(self, text="Manual control:", font=(default_font, default_font_size)).grid(row=2, column=0, columnspan=6, sticky=tk.W)
 
         self._suppress_manual_slider = False
         initial_setpoint = safe_var_float(sv.set_pressure, default=0.0)
@@ -3827,7 +3887,7 @@ class PressureControlPane(ToolbarPane):
             width=260,
             command=self._on_manual_slider,
         )
-        self.manual_slider.grid(row=3, column=0, columnspan=4, padx=padx, pady=(4, 6), sticky="ew")
+        self.manual_slider.grid(row=3, column=0, columnspan=6, padx=padx, pady=(4, 6), sticky="ew")
         self.manual_slider.set(initial_setpoint)
 
         # Recessed Entry
@@ -3875,6 +3935,7 @@ class PressureControlPane(ToolbarPane):
         self.model_vars.app.auto_pressure.trace_add(
             "write", lambda *args: self.start_protocol_button_state_callback()
         )
+        self.start_protocol_button_state_callback()
 
 
         # Button for setting pressure
@@ -3892,6 +3953,8 @@ class PressureControlPane(ToolbarPane):
         tooltips = {
             self.pressure_connect_button: "Connect your NI board for pressure control.",
             self.start_protocol_button: "Start pressure ramp experiment.",
+            self.hold_button: "Pause the protocol at the end of the current interval.",
+            self.next_button: "Advance to the next pressure step when on hold.",
             self.set_pressure_button: "Set pressure to indicated value.",
             self.pressure_settings_button: "Open pressure protocol settings.",
             self.outer_diam_entry: "Click -/+ buttons to change desired pressure.",
@@ -3911,12 +3974,17 @@ class PressureControlPane(ToolbarPane):
         if running:
             self.start_protocol_button.configure(image=self.pressure_stop_img)
             self.set_pressure_button.configure(state=tk.DISABLED, fg_color=entry_disabled_color)
+            self.hold_button.configure(state=tk.NORMAL, fg_color=button_enabled_color)
+            self.next_button.configure(state=tk.NORMAL, fg_color=button_enabled_color)
         else:
             self.start_protocol_button.configure(image=self.pressure_start_img)
             if self._locked:
                 self.set_pressure_button.configure(state=tk.DISABLED, fg_color=entry_disabled_color)
             else:
                 self.set_pressure_button.configure(state=tk.NORMAL, fg_color=button_enabled_color)
+            self.hold_button.configure(state=tk.DISABLED, fg_color=entry_disabled_color)
+            self.next_button.configure(state=tk.DISABLED, fg_color=entry_disabled_color)
+        self._refresh_hold_button()
 
     def resize_img(self, img_path, width=50, height=50):  # Match BUTTON_WIDTH and BUTTON_HEIGHT
         img = Image.open(img_path)
@@ -3940,6 +4008,14 @@ class PressureControlPane(ToolbarPane):
             state=button_state,
             fg_color=entry_disabled_color if disabled else button_enabled_color,
         )
+        self.hold_button.configure(
+            state=button_state,
+            fg_color=entry_disabled_color if disabled else button_enabled_color,
+        )
+        self.next_button.configure(
+            state=button_state,
+            fg_color=entry_disabled_color if disabled else button_enabled_color,
+        )
         self.add_button.configure(state=button_state)
         self.minus_button.configure(state=button_state)
         self.pressure_increment_entry.configure(state=slider_state)
@@ -3947,6 +4023,7 @@ class PressureControlPane(ToolbarPane):
             self.manual_slider.configure(state=slider_state)
         self.outer_diam_entry.configure(state=entry_state, fg_color=entry_bg)
         self.slider_value_entry.configure(state=entry_state, fg_color=entry_bg)
+        self._refresh_hold_button()
 
     def set_unlock_state(self, state=tk.NORMAL):
         self.set_lock_state(state=tk.NORMAL)
@@ -3954,6 +4031,8 @@ class PressureControlPane(ToolbarPane):
     def enable_buttons(self):
         self.start_protocol_button.configure(state=tk.NORMAL)
         self.set_pressure_button.configure(state=tk.NORMAL)
+        self.hold_button.configure(state=tk.NORMAL)
+        self.next_button.configure(state=tk.NORMAL)
 
     def _request_device_refresh(self) -> None:
         if not request_setpoint_refresh():
@@ -4586,8 +4665,8 @@ class GraphFrame(ttk.Frame):
 
 
         # Initialize empty plots for dynamic updating
-        (self.od_avg,) = self.ax1.plot([], [], label='OD Avg')
-        (self.id_avg,) = self.ax2.plot([], [], label='ID Avg')
+        (self.od_avg,) = self.ax1.plot([], [], label='Primary')
+        (self.id_avg,) = self.ax2.plot([], [], label='Secondary')
         (self.markers,) = self.ax1_markers.plot([], [], label='Markers')
         (self.markers,) = self.ax2_markers.plot([], [])
         # Repeat for `self.ax2_markers` if necessary
@@ -4624,23 +4703,38 @@ class GraphFrame(ttk.Frame):
         # Convert RGB to hexadecimal
         hex_color_Cblue = '#{:02x}{:02x}{:02x}'.format(C1[0], C1[1], C1[2])
         hex_color_Cgreen = '#{:02x}{:02x}{:02x}'.format(C2[0], C2[1], C2[2])
+        hex_color_pressure = '#e67e22'
 
         if state.dirty.get():
             plot_mask = [b.get() for b in self.state_vars.toolbar.plotting.line_show]
+            axis_settings = self.state_vars.toolbar.graph
+
+            def _metric_data(choice: str):
+                key = (choice or "").lower()
+                if "inner" in key or key == "id":
+                    return state.id_avg.x, state.id_avg.y, "Inner Diameter (ID)", hex_color_Cgreen
+                if "press" in key:
+                    return state.pressure_avg.x, state.pressure_avg.y, "Avg Pressure (mmHg)", hex_color_pressure
+                return state.od_avg.x, state.od_avg.y, "Outer Diameter (OD)", hex_color_Cblue
+
+            x1, y1, label1, color1 = _metric_data(axis_settings.axis1_metric.get())
+            x2, y2, label2, color2 = _metric_data(axis_settings.axis2_metric.get())
 
             # Clear existing vertical lines and annotations
             self.clear_markers()
 
             # self.figure.canvas.restore_region(self.ax1_bg)
             # self.figure.canvas.restore_region(self.ax2_bg)
-            self.od_avg.set_xdata(state.od_avg.x)
-            self.od_avg.set_ydata(state.od_avg.y)
-            self.od_avg.set_color(hex_color_Cblue)
+            self.od_avg.set_xdata(x1)
+            self.od_avg.set_ydata(y1)
+            self.od_avg.set_color(color1)
+            self.ax1.set_ylabel(label1)
             self.ax1.draw_artist(self.od_avg)
 
-            self.id_avg.set_xdata(state.id_avg.x)
-            self.id_avg.set_ydata(state.id_avg.y)
-            self.id_avg.set_color(hex_color_Cgreen)
+            self.id_avg.set_xdata(x2)
+            self.id_avg.set_ydata(y2)
+            self.id_avg.set_color(color2)
+            self.ax2.set_ylabel(label2)
             self.ax2.draw_artist(self.id_avg)
 
             self.markers.set_xdata(state.markers.x)
@@ -4836,6 +4930,8 @@ class GraphFrame(ttk.Frame):
         self.od_avg.set_ydata([])
         self.id_avg.set_xdata([])
         self.id_avg.set_ydata([])
+        state.pressure_avg.x = []
+        state.pressure_avg.y = []
 
         for i in range(NUM_LINES):
             self.od_lines[i].set_xdata([])
@@ -4848,6 +4944,8 @@ class GraphFrame(ttk.Frame):
         state.od_avg.y = []
         state.id_avg.x = []
         state.id_avg.y = []
+        state.pressure_avg.x = []
+        state.pressure_avg.y = []
 
         for i in range(NUM_LINES):
             state.od_lines[i].x = []
@@ -5683,6 +5781,8 @@ class Controller:
         '''
 
         tb.pressure_control_settings.start_protocol_button.configure(command=self.servo_start)
+        tb.pressure_control_settings.hold_button.configure(command=self.servo_hold_step)
+        tb.pressure_control_settings.next_button.configure(command=self.servo_next_step)
         #tb.pressure_protocol_settings.stop_protocol_button.configure(command=self.servo_stop)
         tb.pressure_control_settings.add_button.configure(command=self.increase_pressure)
         tb.pressure_control_settings.minus_button.configure(command=self.decrease_pressure)
@@ -5921,6 +6021,16 @@ class Controller:
         if self.model.pressure_controller is None:
             return
         safe_var_set(self.model.state.toolbar.pressure_protocol.pressure_protocol_flag, 0)
+
+    def servo_hold_step(self):
+        controller = getattr(self.model, "pressure_controller", None)
+        if controller is not None:
+            controller.hold_current_step()
+
+    def servo_next_step(self):
+        controller = getattr(self.model, "pressure_controller", None)
+        if controller is not None:
+            controller.advance_to_next_step()
 
     def decrease_pressure(self):
         increment = safe_var_float(

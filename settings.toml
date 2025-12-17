@@ -17,7 +17,7 @@ num_threads = 1
 file_fps = 1.0
 
 [pressure]
-device = "VasoMotor"
+device = "VasoMoto"
 port = "COM3"
 baud = 115200
 ni_device = "Dev1"

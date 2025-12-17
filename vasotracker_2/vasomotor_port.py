@@ -30,7 +30,7 @@ DATA_PREFIX = "DATA"
 ACK_PREFIX = "ACK"
 
 
-class VasoMotorPort:
+class VasoMotoPort:
     """
     Thin wrapper around `serial.Serial` with dedicated RX/TX workers.
 

@@ -162,6 +162,9 @@ class ArduinoPressureDevice:
         self._keepalive_evt = threading.Event()
         self._keepalive_thread: Optional[threading.Thread] = None
         self._vm_last_device_time: Optional[float] = None
+        self._last_command_ts: float = 0.0
+        self._manual_override: bool = False
+        self._manual_override_timeout_s: float = 1.5
 
     def bind_worker(self, worker: ArduinoSerialWorker) -> None:
         """Attach an async serial worker after construction."""
@@ -205,6 +208,8 @@ class ArduinoPressureDevice:
     def set_pressure(self, value_mmHg: float) -> None:
         v = max(0.0, float(value_mmHg))
         self._last_sent_set_mmHg = v
+        self._last_command_ts = time.monotonic()
+        self._manual_override = False
         if self.worker is not None:
             integer = int(round(v))
             # Send a small burst of command variants so we stay compatible with legacy
@@ -267,7 +272,7 @@ class ArduinoPressureDevice:
     def _keepalive_loop(self) -> None:
         while not self._keepalive_evt.wait(self._keepalive_interval_s):
             value = self._last_sent_set_mmHg
-            if value is None:
+            if value is None or self._manual_override:
                 continue
             if self.worker is None and not getattr(self.arduino, "is_connected", False):
                 continue
@@ -302,6 +307,7 @@ class ArduinoPressureDevice:
             p = self._safe_float(p_raw)
             sp = self._safe_float(sp_raw)
             self._latest = (p, None, sp)
+            self._maybe_detect_manual_override(sp)
             return
         if ack_match := self._vm_ack_pattern.match(s):
             sp = self._safe_float(ack_match.group(1))
@@ -309,6 +315,7 @@ class ArduinoPressureDevice:
                 return
             self._latest = (self._latest[0], self._latest[1], sp)
             self._last_sent_set_mmHg = sp
+            self._maybe_detect_manual_override(sp)
             return
 
         match = self._pattern.search(s)
@@ -330,6 +337,7 @@ class ArduinoPressureDevice:
                 previous = self._latest[2]
                 sp = previous if previous is not None else self._last_sent_set_mmHg
             self._latest = (p1, p2, sp)
+            self._maybe_detect_manual_override(sp)
 
     @staticmethod
     def _safe_float(value: Optional[str]) -> Optional[float]:
@@ -352,6 +360,18 @@ class ArduinoPressureDevice:
                 self.arduino.sendData(payload)
             except Exception:
                 pass
+
+    def _maybe_detect_manual_override(self, setpoint: Optional[float]) -> None:
+        """
+        Detect when the device setpoint changes without a recent app command and pause keepalives.
+        """
+        if setpoint is None:
+            return
+        now = time.monotonic()
+        if self._last_command_ts == 0.0 or (now - self._last_command_ts) > self._manual_override_timeout_s:
+            if self._last_sent_set_mmHg is None or abs(setpoint - self._last_sent_set_mmHg) > 1e-3:
+                self._manual_override = True
+                self._last_sent_set_mmHg = setpoint
 
 
 class NIDaqPressureDevice:

@@ -135,6 +135,8 @@ class GraphAxisSettings(Configurator):
     y_max1: float = 250.0
     y_min2: float = 25.0
     y_max2: float = 200.0
+    axis1_metric: str = "Outer diameter"
+    axis2_metric: str = "Inner diameter"
 
     def set_values(self, state: "VtState"):
         g = state.toolbar.graph
@@ -144,6 +146,8 @@ class GraphAxisSettings(Configurator):
         _safe_set(g.y_max_od, self.y_max1)
         _safe_set(g.y_min_id, self.y_min2)
         _safe_set(g.y_max_id, self.y_max2)
+        _safe_set(g.axis1_metric, self.axis1_metric)
+        _safe_set(g.axis2_metric, self.axis2_metric)
     @classmethod
     def from_state(cls, state: "VtState"):
         g = state.toolbar.graph
@@ -154,6 +158,8 @@ class GraphAxisSettings(Configurator):
             y_max1=g.y_max_od.get(),
             y_min2=g.y_min_id.get(),
             y_max2=g.y_max_od.get(),
+            axis1_metric=g.axis1_metric.get(),
+            axis2_metric=g.axis2_metric.get(),
         )
 
 
@@ -176,7 +182,7 @@ class MemorySettings(Configurator):
 
 @dataclass
 class PressureHardwareSettings(Configurator):
-    device: str = "VasoMotor"
+    device: str = "VasoMoto"
     port: str = "COM5"
     baud: int = 115200
     ni_device: str = "Dev1"
@@ -186,12 +192,12 @@ class PressureHardwareSettings(Configurator):
     @staticmethod
     def _normalize_device_name(name: Optional[str]) -> str:
         if not isinstance(name, str):
-            return "VasoMotor"
+            return "VasoMoto"
         lowered = name.strip().lower()
         if lowered == "arduino":
-            return "VasoMotor"
+            return "VasoMoto"
         if lowered in ("vasomotor", "vasomoto"):
-            return "VasoMotor"
+            return "VasoMoto"
         return name
 
     def set_values(self, state: "VtState"):
@@ -303,10 +309,10 @@ class Config(Configurator):
         data = toml.load(path)
         if "pressure" not in data:
             servo_data = data.pop("servo", {}) or {}
-            pressure_device = "NI-DAQ" if servo_data.get("device") else "VasoMotor"
+            pressure_device = "NI-DAQ" if servo_data.get("device") else "VasoMoto"
             data["pressure"] = {
                 "device": pressure_device,
-                "port": "COM5" if pressure_device in ("Arduino", "VasoMotor") else "",
+                "port": "COM5" if pressure_device in ("Arduino", "VasoMoto") else "",
                 "baud": 115_200,
                 "ni_device": servo_data.get("device", "Dev1"),
                 "ni_ao_channel": servo_data.get("ao_channel", "ao1"),

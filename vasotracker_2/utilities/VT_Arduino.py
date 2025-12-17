@@ -8,7 +8,7 @@
 # #################################################
 
 """
-Cross-platform VasoMotor serial helper used by the pressure device layer.
+Cross-platform VasoMoto serial helper used by the pressure device layer.
 
 The previous implementation relied on Windows-specific discovery logic and
 device-specific framing. This module now provides a lightweight wrapper over
@@ -26,7 +26,7 @@ try:
     import serial
 except ImportError as exc:  # pragma: no cover - handled at runtime
     raise ImportError(
-        "pyserial is required for VasoMotor communication. Install with `pip install pyserial`."
+        "pyserial is required for VasoMoto communication. Install with `pip install pyserial`."
     ) from exc
 
 
@@ -39,7 +39,7 @@ class Arduino:
     port:
         Serial port string (e.g. 'COM5', '/dev/ttyACM0', or 'loop://').
     baud:
-        Baud rate used by the VasoMotor sketch (default: 115200).
+        Baud rate used by the VasoMoto sketch (default: 115200).
     timeout:
         Default read timeout in seconds (overridden per-call by `readline`).
     auto_connect:
@@ -116,7 +116,7 @@ class Arduino:
 
     def sendData(self, text: str) -> None:
         """
-        Send ASCII text to the VasoMotor controller and bridge modern commands to the
+        Send ASCII text to the VasoMoto controller and bridge modern commands to the
         legacy angle-bracket protocol expected by older firmware.
         """
         if not self.serial or not self.serial.is_open:
@@ -191,11 +191,11 @@ class Arduino:
                 # Lazy import keeps this utility usable in headless contexts.
                 from tkinter import messagebox
 
-                messagebox.showerror("VasoMotor connection failed", message)
+                messagebox.showerror("VasoMoto connection failed", message)
             except Exception:
-                print("VasoMotor connection failed:", message)
+                print("VasoMoto connection failed:", message)
         else:
-            print("VasoMotor connection failed:", message)
+            print("VasoMoto connection failed:", message)
         self._error_notified = True
 
 
