@@ -157,7 +157,7 @@ class GraphAxisSettings(Configurator):
             y_min1=g.y_min_od.get(),
             y_max1=g.y_max_od.get(),
             y_min2=g.y_min_id.get(),
-            y_max2=g.y_max_od.get(),
+            y_max2=g.y_max_id.get(),
             axis1_metric=g.axis1_metric.get(),
             axis2_metric=g.axis2_metric.get(),
         )

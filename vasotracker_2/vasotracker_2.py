@@ -3101,10 +3101,12 @@ class GraphSettingsPane(ToolbarPane):
         ctk.CTkLabel(self, text="Min:", font=(default_font, default_font_size)).grid(row=1, column=1, sticky=tk.NS, padx=padx, pady=pady)
         ctk.CTkLabel(self, text="Max:", font=(default_font, default_font_size)).grid(row=1, column=2, sticky=tk.NS, padx=padx, pady=pady)
         ctk.CTkLabel(self, text="Time:", font=(default_font, default_font_size)).grid(row=2, column=0, sticky=tk.E, padx=padx, pady=pady)
-        ctk.CTkLabel(self, text="OD:", font=(default_font, default_font_size)).grid(row=3, column=0, sticky=tk.E, padx=padx, pady=pady)
-        ctk.CTkLabel(self, text="ID:", font=(default_font, default_font_size)).grid(row=4, column=0, sticky=tk.E, padx=padx, pady=pady)
-        ctk.CTkLabel(self, text="Left trace:", font=(default_font, default_font_size)).grid(row=5, column=0, sticky=tk.E, padx=padx, pady=pady)
-        ctk.CTkLabel(self, text="Right trace:", font=(default_font, default_font_size)).grid(row=6, column=0, sticky=tk.E, padx=padx, pady=pady)
+        self.axis1_label_var = tk.StringVar(value="Top axis (Outer diameter)")
+        self.axis2_label_var = tk.StringVar(value="Bottom axis (Inner diameter)")
+        ctk.CTkLabel(self, textvariable=self.axis1_label_var, font=(default_font, default_font_size)).grid(row=3, column=0, sticky=tk.E, padx=padx, pady=pady)
+        ctk.CTkLabel(self, textvariable=self.axis2_label_var, font=(default_font, default_font_size)).grid(row=4, column=0, sticky=tk.E, padx=padx, pady=pady)
+        ctk.CTkLabel(self, text="Top trace:", font=(default_font, default_font_size)).grid(row=5, column=0, sticky=tk.E, padx=padx, pady=pady)
+        ctk.CTkLabel(self, text="Bottom trace:", font=(default_font, default_font_size)).grid(row=6, column=0, sticky=tk.E, padx=padx, pady=pady)
 
         graphaxes_entry_width = 75
 
@@ -3175,7 +3177,7 @@ class GraphSettingsPane(ToolbarPane):
             padx=padx,
             pady=pady
         )
-        metric_options = ["Outer diameter", "Inner diameter", "Avg pressure"]
+        metric_options = ["Outer diameter", "Inner diameter", "Avg pressure", "Hidden"]
         self.axis1_metric_menu = ctk.CTkOptionMenu(
             self,
             variable=sv.axis1_metric,
@@ -3215,10 +3217,25 @@ class GraphSettingsPane(ToolbarPane):
 
         sv.axis1_metric.trace_add("write", lambda *args: self._on_metric_change())
         sv.axis2_metric.trace_add("write", lambda *args: self._on_metric_change())
+        self._refresh_axis_labels()
 
     def _on_metric_change(self):
         try:
             self.model_vars.graph.dirty.set(True)
+        except Exception:
+            pass
+        self._refresh_axis_labels()
+
+    def _refresh_axis_labels(self) -> None:
+        def _label_text(position: str, metric: str) -> str:
+            metric = (metric or "").strip()
+            if metric.lower() in ("hidden", "none"):
+                return f"{position} axis (hidden)"
+            return f"{position} axis ({metric})"
+
+        try:
+            self.axis1_label_var.set(_label_text("Top", self.model_vars.toolbar.graph.axis1_metric.get()))
+            self.axis2_label_var.set(_label_text("Bottom", self.model_vars.toolbar.graph.axis2_metric.get()))
         except Exception:
             pass
 
@@ -4813,6 +4830,7 @@ class GraphFrame(ttk.Frame):
         hex_color_Cblue = '#{:02x}{:02x}{:02x}'.format(C1[0], C1[1], C1[2])
         hex_color_Cgreen = '#{:02x}{:02x}{:02x}'.format(C2[0], C2[1], C2[2])
         hex_color_pressure = '#e67e22'
+        hex_color_hidden = '#95a5a6'
 
         if state.dirty.get():
             plot_mask = [b.get() for b in self.state_vars.toolbar.plotting.line_show]
@@ -4820,14 +4838,18 @@ class GraphFrame(ttk.Frame):
 
             def _metric_data(choice: str):
                 key = (choice or "").lower()
+                if key in ("hidden", "none", "off"):
+                    return [], [], "Hidden", hex_color_hidden, None
                 if "inner" in key or key == "id":
-                    return state.id_avg.x, state.id_avg.y, "Inner Diameter (ID)", hex_color_Cgreen
+                    return state.id_avg.x, state.id_avg.y, "Inner Diameter (ID)", hex_color_Cgreen, "inner"
                 if "press" in key:
-                    return state.pressure_avg.x, state.pressure_avg.y, "Avg Pressure (mmHg)", hex_color_pressure
-                return state.od_avg.x, state.od_avg.y, "Outer Diameter (OD)", hex_color_Cblue
+                    return state.pressure_avg.x, state.pressure_avg.y, "Avg Pressure (mmHg)", hex_color_pressure, "pressure"
+                return state.od_avg.x, state.od_avg.y, "Outer Diameter (OD)", hex_color_Cblue, "outer"
 
-            x1, y1, label1, color1 = _metric_data(axis_settings.axis1_metric.get())
-            x2, y2, label2, color2 = _metric_data(axis_settings.axis2_metric.get())
+            x1, y1, label1, color1, kind1 = _metric_data(axis_settings.axis1_metric.get())
+            x2, y2, label2, color2, kind2 = _metric_data(axis_settings.axis2_metric.get())
+            axis1_hidden = kind1 is None
+            axis2_hidden = kind2 is None
 
             # Clear existing vertical lines and annotations
             self.clear_markers()
@@ -4846,8 +4868,17 @@ class GraphFrame(ttk.Frame):
             self.ax2.set_ylabel(label2)
             self.ax2.draw_artist(self.id_avg)
 
-            self.markers.set_xdata(state.markers.x)
-            self.markers.set_ydata(state.markers.y)
+            if axis1_hidden and axis2_hidden:
+                self.markers.set_xdata([])
+                self.markers.set_ydata([])
+            else:
+                self.markers.set_xdata(state.markers.x)
+                self.markers.set_ydata(state.markers.y)
+
+            show_axis1_lines = kind1 in ("outer", "inner")
+            show_axis2_lines = kind2 in ("outer", "inner")
+            axis1_line_source = state.id_lines if kind1 == "inner" else state.od_lines
+            axis2_line_source = state.id_lines if kind2 == "inner" else state.od_lines
 
             for i, plot in enumerate(plot_mask):
                 if not plot:
@@ -4857,15 +4888,23 @@ class GraphFrame(ttk.Frame):
                     self.id_lines[i].set_ydata([])
                     continue
 
-                self.od_lines[i].set_xdata(state.od_lines[i].x)
-                self.od_lines[i].set_ydata(state.od_lines[i].y)
-                self.od_lines[i].set_color(f"C{i}")
-                self.ax1.draw_artist(self.od_lines[i])
+                if show_axis1_lines:
+                    self.od_lines[i].set_xdata(axis1_line_source[i].x)
+                    self.od_lines[i].set_ydata(axis1_line_source[i].y)
+                    self.od_lines[i].set_color(f"C{i}")
+                    self.ax1.draw_artist(self.od_lines[i])
+                else:
+                    self.od_lines[i].set_xdata([])
+                    self.od_lines[i].set_ydata([])
 
-                self.id_lines[i].set_xdata(state.id_lines[i].x)
-                self.id_lines[i].set_ydata(state.id_lines[i].y)
-                self.id_lines[i].set_color(f"C{i}")
-                self.ax2.draw_artist(self.id_lines[i])
+                if show_axis2_lines:
+                    self.id_lines[i].set_xdata(axis2_line_source[i].x)
+                    self.id_lines[i].set_ydata(axis2_line_source[i].y)
+                    self.id_lines[i].set_color(f"C{i}")
+                    self.ax2.draw_artist(self.id_lines[i])
+                else:
+                    self.id_lines[i].set_xdata([])
+                    self.id_lines[i].set_ydata([])
 
             
             #marker_coords = [state.od_avg.x[0], state.od_avg.x[len(state.od_avg.x) // 2], state.od_avg.x[-1]]
@@ -4882,56 +4921,81 @@ class GraphFrame(ttk.Frame):
             #    self.ax2_markers.add_line(line2)
             #
 
-            # Create Line2D objects for markers on both axes
-            self.od_markers_line = Line2D([], [], color='red', marker='o', markersize=5, linewidth=1, label='Markers', linestyle='-')
-            self.id_markers_line = Line2D([], [], color='red', marker='o', markersize=5, linewidth=1, label='Markers', linestyle='-')
-
-            # Add the marker lines to their respective axes
-            self.ax1_markers.add_line(self.od_markers_line)
-            self.ax2_markers.add_line(self.id_markers_line)
-
-            # Update marker positions based on state.markers.y
-            marker_x = []
-            od_marker_y = []
-            id_marker_y = []
+            # Create Line2D objects for markers on both axes (only when visible)
+            if not axis1_hidden:
+                self.od_markers_line = Line2D([], [], color='red', marker='o', markersize=5, linewidth=1, label='Markers', linestyle='-')
+                self.ax1_markers.add_line(self.od_markers_line)
+            else:
+                self.od_markers_line = None
+            if not axis2_hidden:
+                self.id_markers_line = Line2D([], [], color='red', marker='o', markersize=5, linewidth=1, label='Markers', linestyle='-')
+                self.ax2_markers.add_line(self.id_markers_line)
+            else:
+                self.id_markers_line = None
 
             # Create Line2D objects for markers
             count = 1
             for x, y in zip(state.markers.x, state.markers.y):
                 if y == 1:
                     color = 'green'
-                    marker_line_od = Line2D([x, x], [self.ylim_od[0], self.ylim_od[1]], color=color, marker='o', markersize=5, linewidth=1)
-                    marker_line_id = Line2D([x, x], [self.ylim_id[0], self.ylim_id[1]], color=color, marker='o', markersize=5, linewidth=1)
-
-                    # Add the lines to the axes
-                    self.ax1_markers.add_line(marker_line_od)
-                    self.ax2_markers.add_line(marker_line_id)
-
-                    # Add labels
-                    self.ax1_markers.annotate(
-                        f"{int(count)}",  # Convert x to integer for label
-                        (x, self.ylim_od[1]),
-                        xytext=(0, 5),
-                        textcoords='offset points',
-                        color=color,
-                        ha='center',
-                        va='center'
-                    )
-
-                    self.ax2_markers.annotate(
-                        f"{int(count)}",  # Convert x to integer for label
-                        (x, self.ylim_id[1]),
-                        xytext=(0, 5),
-                        textcoords='offset points',
-                        color=color,
-                        ha='center',
-                        va='center'
-                    )
-                    count += 1
+                    if not axis1_hidden:
+                        marker_line_od = Line2D([x, x], [self.ylim_od[0], self.ylim_od[1]], color=color, marker='o', markersize=5, linewidth=1)
+                        self.ax1_markers.add_line(marker_line_od)
+                        self.ax1_markers.annotate(
+                            f"{int(count)}",
+                            (x, self.ylim_od[1]),
+                            xytext=(0, 5),
+                            textcoords='offset points',
+                            color=color,
+                            ha='center',
+                            va='center'
+                        )
+                    if not axis2_hidden:
+                        marker_line_id = Line2D([x, x], [self.ylim_id[0], self.ylim_id[1]], color=color, marker='o', markersize=5, linewidth=1)
+                        self.ax2_markers.add_line(marker_line_id)
+                        self.ax2_markers.annotate(
+                            f"{int(count)}",
+                            (x, self.ylim_id[1]),
+                            xytext=(0, 5),
+                            textcoords='offset points',
+                            color=color,
+                            ha='center',
+                            va='center'
+                        )
+                    if not axis1_hidden or not axis2_hidden:
+                        count += 1
+                elif y == 0:
+                    color = 'blue'
+                    if not axis1_hidden:
+                        marker_line_od = Line2D([x, x], [self.ylim_od[0], self.ylim_od[1]], color=color, marker='o', markersize=5, linewidth=1)
+                        self.ax1_markers.add_line(marker_line_od)
+                        self.ax1_markers.annotate(
+                            f"{int(count)}",
+                            (x, self.ylim_od[0]),
+                            xytext=(0, -10),
+                            textcoords='offset points',
+                            color=color,
+                            ha='center',
+                            va='center'
+                        )
+                    if not axis2_hidden:
+                        marker_line_id = Line2D([x, x], [self.ylim_id[0], self.ylim_id[1]], color=color, marker='o', markersize=5, linewidth=1)
+                        self.ax2_markers.add_line(marker_line_id)
+                        self.ax2_markers.annotate(
+                            f"{int(count)}",
+                            (x, self.ylim_id[0]),
+                            xytext=(0, -10),
+                            textcoords='offset points',
+                            color=color,
+                            ha='center',
+                            va='center'
+                        )
+                    if not axis1_hidden or not axis2_hidden:
+                        count += 1
 
             if state.vertical_indicator is not None:
-                self.ax1_vline.set_xdata([state.vertical_indicator])
-                self.ax2_vline.set_xdata([state.vertical_indicator])
+                self.ax1_vline.set_xdata([] if axis1_hidden else [state.vertical_indicator])
+                self.ax2_vline.set_xdata([] if axis2_hidden else [state.vertical_indicator])
 
 
             self.figure.canvas.draw()

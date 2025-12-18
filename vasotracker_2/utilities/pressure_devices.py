@@ -283,6 +283,14 @@ class ArduinoPressureDevice:
             value = self._last_sent_set_mmHg
             if value is None or self._manual_override:
                 continue
+            last_cmd_age = (
+                time.monotonic() - self._last_command_ts
+                if self._last_command_ts > 0.0
+                else float("inf")
+            )
+            # After a short idle period, back off so the physical knob can take over
+            if last_cmd_age > self._manual_override_timeout_s:
+                continue
             if self.worker is None and not getattr(self.arduino, "is_connected", False):
                 continue
             self._queue_command(f"SET P={value:.1f}")
@@ -405,37 +413,44 @@ class ArduinoPressureDevice:
         if setpoint is None:
             return
         now = time.monotonic()
+        last_cmd_age = (
+            now - self._last_command_ts if self._last_command_ts > 0.0 else float("inf")
+        )
+        delta = None if self._last_sent_set_mmHg is None else abs(setpoint - self._last_sent_set_mmHg)
 
-        # Check if enough time has passed since last app command (manual override window)
-        if self._last_command_ts == 0.0 or (now - self._last_command_ts) > self._manual_override_timeout_s:
-            if self._last_sent_set_mmHg is None or abs(setpoint - self._last_sent_set_mmHg) > 1e-3:
-                was_override = self._manual_override
-                self._manual_override = True
-                self._last_sent_set_mmHg = setpoint
+        # If the device is just echoing our recent command, don't treat it as manual control.
+        if delta is not None and delta <= 0.25 and last_cmd_age <= self._manual_override_timeout_s:
+            return
 
-                # Broadcast setpoint change to UI for bidirectional sync
-                # Only broadcast if value changed to avoid spamming listeners
-                if self._last_broadcasted_setpoint is None or abs(setpoint - self._last_broadcasted_setpoint) > 0.1:
-                    self._last_broadcasted_setpoint = setpoint
+        # Any meaningful change away from the app-set target counts as a manual override.
+        if delta is None or delta > 0.5 or last_cmd_age > self._manual_override_timeout_s:
+            was_override = self._manual_override
+            self._manual_override = True
+            self._last_sent_set_mmHg = setpoint
+
+            # Broadcast setpoint change to UI for bidirectional sync
+            # Only broadcast if value changed to avoid spamming listeners
+            if self._last_broadcasted_setpoint is None or abs(setpoint - self._last_broadcasted_setpoint) > 0.1:
+                self._last_broadcasted_setpoint = setpoint
+                try:
+                    # Import here to avoid circular dependency
                     try:
-                        # Import here to avoid circular dependency
-                        try:
-                            from ..setpoint_bus import broadcast_setpoint
-                        except ImportError:
-                            from setpoint_bus import broadcast_setpoint
+                        from ..setpoint_bus import broadcast_setpoint
+                    except ImportError:
+                        from setpoint_bus import broadcast_setpoint
 
-                        # Broadcast with source indicating manual knob control
-                        # UI listeners can use this to update sliders, displays, and show indicators
-                        broadcast_setpoint(setpoint, source="device_knob")
+                    # Broadcast with source indicating manual knob control
+                    # UI listeners can use this to update sliders, displays, and show indicators
+                    broadcast_setpoint(setpoint, source="device_knob")
 
-                        if not was_override:
-                            # First detection of manual override - physical knob is now in control
-                            # UI can display a visual indicator that manual mode is active
-                            # Keepalive commands will be paused until app sends a new command
-                            pass
-                    except Exception:
-                        # Fail silently if broadcast isn't available (e.g., during testing)
+                    if not was_override:
+                        # First detection of manual override - physical knob is now in control
+                        # UI can display a visual indicator that manual mode is active
+                        # Keepalive commands will be paused until app sends a new command
                         pass
+                except Exception:
+                    # Fail silently if broadcast isn't available (e.g., during testing)
+                    pass
 
 
 class NIDaqPressureDevice:

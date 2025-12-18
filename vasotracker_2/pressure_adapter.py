@@ -310,12 +310,20 @@ class PressureAdapter:
             with self._lock:
                 port = self._vm_port
                 value = self._last_command_value
-                if port is None or value is None or self._manual_override:
-                    continue
-                try:
-                    port.tx_q.put(f"SET P={value:.1f}")
-                except Exception:
-                    continue
+                manual = self._manual_override
+                last_cmd_age = (
+                    time.monotonic() - self._last_command_ts
+                    if self._last_command_ts > 0.0
+                    else float("inf")
+                )
+            if port is None or value is None or manual:
+                continue
+            if last_cmd_age > self._manual_override_timeout_s:
+                continue
+            try:
+                port.tx_q.put(f"SET P={value:.1f}")
+            except Exception:
+                continue
 
     def _publish(self, reading: PressureReading) -> None:
         """Push a reading onto the queue, dropping the oldest on overflow."""
@@ -336,18 +344,26 @@ class PressureAdapter:
         numeric = float(value)
         now = time.monotonic()
         with self._lock:
-            if (
-                self._last_command_value is not None
-                and abs(numeric - self._last_command_value) < 1e-3
-            ):
-                # Matches our current target; keep keepalive active.
+            delta = (
+                None
+                if self._last_command_value is None
+                else abs(numeric - self._last_command_value)
+            )
+            recent_age = (
+                now - self._last_command_ts if self._last_command_ts > 0.0 else float("inf")
+            )
+
+            if delta is not None and delta <= 0.25:
+                # Close enough to our target to treat as an ACK/echo.
                 self._last_command_ts = now
-            elif self._last_command_ts == 0.0 or (now - self._last_command_ts) > self._manual_override_timeout_s:
-                # Device setpoint changed without a recent app command -> assume manual override.
+                self._manual_override = False
+                self._last_command_value = numeric
+            elif delta is None or delta > 0.5 or recent_age > self._manual_override_timeout_s:
+                # Device setpoint shifted meaningfully (likely the physical knob).
                 self._manual_override = True
                 self._last_command_value = numeric
             else:
-                # Fresh ACK following our own command; sync value.
+                # Small drift; sync without toggling control state.
                 self._last_command_value = numeric
         self._last_callback_value = self._notify_setpoint_once(
             numeric, self._last_callback_value
