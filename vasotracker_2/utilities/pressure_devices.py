@@ -100,7 +100,7 @@ class SimPressureDevice:
             time.sleep(self._dt)
 
     def read_latest(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-        return (round(self._p1, 2), round(self._p2, 2), round(self._sp, 2))
+        return (round(self._p1, 1), round(self._p2, 1), round(self._sp, 1))
 
 
 class ArduinoPressureDevice:

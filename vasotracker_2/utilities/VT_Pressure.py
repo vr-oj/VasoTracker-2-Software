@@ -534,11 +534,11 @@ class PressureController:
         avg = _safe_mean([p1, p2])
         try:
             if avg is not None:
-                tb.data_acq.pressure.set(round(avg, 2))
+                tb.data_acq.pressure.set(round(avg, 1))
             if p1 is not None and hasattr(tb.data_acq, "pressure1"):
-                tb.data_acq.pressure1.set(round(p1, 2))
+                tb.data_acq.pressure1.set(round(p1, 1))
             if p2 is not None and hasattr(tb.data_acq, "pressure2"):
-                tb.data_acq.pressure2.set(round(p2, 2))
+                tb.data_acq.pressure2.set(round(p2, 1))
         except Exception:
             pass
 
