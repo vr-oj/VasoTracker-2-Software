@@ -164,7 +164,8 @@ class ArduinoPressureDevice:
         self._vm_last_device_time: Optional[float] = None
         self._last_command_ts: float = 0.0
         self._manual_override: bool = False
-        self._manual_override_timeout_s: float = 1.5
+        self._manual_override_timeout_s: float = 2.5  # Increased for smoother knob operation
+        self._last_broadcasted_setpoint: Optional[float] = None
 
     def bind_worker(self, worker: ArduinoSerialWorker) -> None:
         """Attach an async serial worker after construction."""
@@ -209,7 +210,15 @@ class ArduinoPressureDevice:
         v = max(0.0, float(value_mmHg))
         self._last_sent_set_mmHg = v
         self._last_command_ts = time.monotonic()
+
+        # Track if we're exiting manual override mode
+        was_manual = self._manual_override
         self._manual_override = False
+
+        # If transitioning from manual to app control, could notify UI
+        if was_manual:
+            # App has taken control back from manual knob
+            pass
         if self.worker is not None:
             integer = int(round(v))
             # Send a small burst of command variants so we stay compatible with legacy
@@ -294,6 +303,31 @@ class ArduinoPressureDevice:
     def read_latest(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         return self._latest
 
+    def is_manual_override_active(self) -> bool:
+        """
+        Check if manual override mode is currently active.
+
+        Returns True when the physical knob is being used and the app has
+        paused sending keepalive commands to avoid fighting with manual adjustments.
+        """
+        return self._manual_override
+
+    def get_control_status(self) -> dict:
+        """
+        Get detailed status about current control state.
+
+        Returns a dictionary with:
+        - manual_override: bool - Whether knob control is active
+        - last_setpoint: float or None - Last known setpoint
+        - time_since_command: float - Seconds since last app command
+        """
+        now = time.monotonic()
+        return {
+            "manual_override": self._manual_override,
+            "last_setpoint": self._last_sent_set_mmHg,
+            "time_since_command": now - self._last_command_ts if self._last_command_ts > 0 else float('inf'),
+        }
+
     def handle_line(self, line: str) -> None:
         """Entry point used by the async worker to feed telemetry."""
         self._process_line(line.strip())
@@ -364,14 +398,44 @@ class ArduinoPressureDevice:
     def _maybe_detect_manual_override(self, setpoint: Optional[float]) -> None:
         """
         Detect when the device setpoint changes without a recent app command and pause keepalives.
+
+        When manual override is detected (e.g., physical knob adjustment), broadcasts the new
+        setpoint to update the UI in real-time, creating seamless bidirectional synchronization.
         """
         if setpoint is None:
             return
         now = time.monotonic()
+
+        # Check if enough time has passed since last app command (manual override window)
         if self._last_command_ts == 0.0 or (now - self._last_command_ts) > self._manual_override_timeout_s:
             if self._last_sent_set_mmHg is None or abs(setpoint - self._last_sent_set_mmHg) > 1e-3:
+                was_override = self._manual_override
                 self._manual_override = True
                 self._last_sent_set_mmHg = setpoint
+
+                # Broadcast setpoint change to UI for bidirectional sync
+                # Only broadcast if value changed to avoid spamming listeners
+                if self._last_broadcasted_setpoint is None or abs(setpoint - self._last_broadcasted_setpoint) > 0.1:
+                    self._last_broadcasted_setpoint = setpoint
+                    try:
+                        # Import here to avoid circular dependency
+                        try:
+                            from ..setpoint_bus import broadcast_setpoint
+                        except ImportError:
+                            from setpoint_bus import broadcast_setpoint
+
+                        # Broadcast with source indicating manual knob control
+                        # UI listeners can use this to update sliders, displays, and show indicators
+                        broadcast_setpoint(setpoint, source="device_knob")
+
+                        if not was_override:
+                            # First detection of manual override - physical knob is now in control
+                            # UI can display a visual indicator that manual mode is active
+                            # Keepalive commands will be paused until app sends a new command
+                            pass
+                    except Exception:
+                        # Fail silently if broadcast isn't available (e.g., during testing)
+                        pass
 
 
 class NIDaqPressureDevice:
