@@ -8,4 +8,4 @@
 ##################################################
 
 
-__version__ = "Tykocki Lab MOD 2.5"
+__version__ = "Tykocki Lab MOD 2.5.5"
