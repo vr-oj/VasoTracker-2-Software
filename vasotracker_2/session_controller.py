@@ -259,7 +259,7 @@ class SessionController:
                 and abs(numeric - self._last_command_value) > 1.0
             ):
                 logger.warning(
-                    "Setpoint echo %.2f mmHg diverges from last command %.2f mmHg",
+                    "Setpoint echo %.1f mmHg diverges from last command %.1f mmHg",
                     numeric,
                     self._last_command_value,
                 )

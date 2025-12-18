@@ -1822,10 +1822,10 @@ class Model:
                     "Inner Diameter": float(diams.avg_inner_diam),
                     "Table Marker": marker,
                     "Temperature (oC)": temperature_value,
-                    "Pressure 1 (mmHg)": p1_val,
-                    "Pressure 2 (mmHg)": p2_val,
-                    "Avg Pressure (mmHg)": avg_pressure_val,
-                    "Set Pressure (mmHg)": set_pressure_val,
+                    "Pressure 1 (mmHg)": round(p1_val, 1) if not math.isnan(p1_val) else p1_val,
+                    "Pressure 2 (mmHg)": round(p2_val, 1) if not math.isnan(p2_val) else p2_val,
+                    "Avg Pressure (mmHg)": round(avg_pressure_val, 1) if not math.isnan(avg_pressure_val) else avg_pressure_val,
+                    "Set Pressure (mmHg)": round(set_pressure_val, 1) if not math.isnan(set_pressure_val) else set_pressure_val,
                     "Caliper length": caliper_length_val,
                     "Outer Profiles": json.dumps(list(map(float, diams.outer_diam))),
                     "Inner Profiles": json.dumps(list(map(float, diams.inner_diam))),
@@ -2573,9 +2573,9 @@ class Model:
             percentage,
             diams.avg_inner_diam,
             caliper_length,
-            pavg,
-            p1,
-            p2,
+            round(pavg, 1) if not math.isnan(pavg) else pavg,
+            round(p1, 1) if not math.isnan(p1) else p1,
+            round(p2, 1) if not math.isnan(p2) else p2,
             temp
         ]
         self.table_writer.writerow(values)
@@ -2590,9 +2590,9 @@ class Model:
             percentage_as_str,
             str(np.round(diams.avg_inner_diam, 2)),
             str(caliper_length),
-            str(np.round(pavg, 2)) if not math.isnan(pavg) else "",
-            str(np.round(p1, 2)) if not math.isnan(p1) else "",
-            str(np.round(p2, 2)) if not math.isnan(p2) else "",
+            str(np.round(pavg, 1)) if not math.isnan(pavg) else "",
+            str(np.round(p1, 1)) if not math.isnan(p1) else "",
+            str(np.round(p2, 1)) if not math.isnan(p2) else "",
             str(np.round(temp, 2)) if not math.isnan(temp) else "",
         ]
         table.rows_to_add.append(disp_values)

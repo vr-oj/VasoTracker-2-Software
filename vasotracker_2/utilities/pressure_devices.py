@@ -224,7 +224,7 @@ class ArduinoPressureDevice:
             # Send a small burst of command variants so we stay compatible with legacy
             # sketches that expect different verbs/delimiters.
             commands = (
-                f"SET:{v:.2f}",
+                f"SET:{v:.1f}",
                 f"<{integer}>",
                 f"P {integer}",
                 f"P:{integer}",
@@ -247,7 +247,7 @@ class ArduinoPressureDevice:
             integer = int(round(v))
             # Mirror the worker path when running in synchronous/polling mode.
             commands = (
-                f"SET:{v:.2f}",
+                f"SET:{v:.1f}",
                 f"<{integer}>",
                 f"P {integer}",
                 f"P:{integer}",

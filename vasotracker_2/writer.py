@@ -154,7 +154,7 @@ class Writer:
             and not self._stale_setpoint_warned
         ):
             logging.warning(
-                "Setpoint marker %s arrived but CSV value did not change (%.2f mmHg).",
+                "Setpoint marker %s arrived but CSV value did not change (%.1f mmHg).",
                 note,
                 setpoint_mmHg,
             )

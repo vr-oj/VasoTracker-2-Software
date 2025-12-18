@@ -510,7 +510,7 @@ class PressureController:
 
         self.set_pressure = value
         pressure_protocol_settings = self.model.state.toolbar.pressure_protocol
-        self._set_var_safe(pressure_protocol_settings.set_pressure, f"{value:.2f}")
+        self._set_var_safe(pressure_protocol_settings.set_pressure, f"{value:.1f}")
 
         handled = notify_setpoint(value, source="PressureController")
         if not handled:
@@ -549,7 +549,7 @@ class PressureController:
                 numeric_sp = None
             else:
                 if numeric_sp is not None and not math.isnan(numeric_sp):
-                    protocol_formatted = f"{numeric_sp:.2f}"
+                    protocol_formatted = f"{numeric_sp:.1f}"
                     device_formatted = f"{numeric_sp:.1f}"
                     self._set_var_safe(tb.pressure_protocol.set_pressure, protocol_formatted)
                     device_set_var = getattr(tb.pressure_protocol, "device_set_pressure", None)
