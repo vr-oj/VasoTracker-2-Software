@@ -3857,7 +3857,7 @@ class PressureControlPane(ToolbarPane):
         self._debug_visible = False
         sv.hold_step.trace_add("write", lambda *args: self._refresh_hold_button())
 
-        # Device status display (outside tabs)
+        # Device status label (kept for backward compatibility but not displayed at top)
         self.device_set_label = ctk.CTkLabel(
             self,
             textvariable=self._device_display_var,
@@ -3865,10 +3865,10 @@ class PressureControlPane(ToolbarPane):
             text_color=self._colour_neutral,
             anchor=tk.W,
         )
-        self.device_set_label.pack(fill=tk.X, padx=(10, 5), pady=(6, 2))
+        # Not packed - saves vertical space
 
-        # Create tabview for organized controls
-        self.tabview = ctk.CTkTabview(self, width=260, height=300)
+        # Create tabview for organized controls (height increased to fill available space)
+        self.tabview = ctk.CTkTabview(self, width=260, height=340)
         self.tabview.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # Create tabs
