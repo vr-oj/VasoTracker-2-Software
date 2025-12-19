@@ -4866,9 +4866,10 @@ class GraphFrame(ttk.Frame):
             ax1_has_multi_roi = any(plot_mask[i] and len(state.od_lines[i].x) > 0 for i in range(len(plot_mask)))
             ax2_has_multi_roi = any(plot_mask[i] and len(state.id_lines[i].x) > 0 for i in range(len(plot_mask)))
 
-            # Show axis if either primary OR multi-ROI traces are present
-            ax1_should_show = ax1_has_primary or ax1_has_multi_roi
-            ax2_should_show = ax2_has_primary or ax2_has_multi_roi
+            # Show axis if metric is set (not "None") OR if multi-ROI traces are present
+            # This ensures axes remain visible even when there's no data yet
+            ax1_should_show = (type1 is not None) or ax1_has_multi_roi
+            ax2_should_show = (type2 is not None) or ax2_has_multi_roi
 
             # Show/hide axes
             self.ax1.set_visible(ax1_should_show)
