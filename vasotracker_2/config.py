@@ -164,6 +164,28 @@ class GraphAxisSettings(Configurator):
 
 
 @dataclass
+class PlottingSettings(Configurator):
+    visible_traces: list = field(default_factory=lambda: [False] * 25)
+
+    def set_values(self, state: "VtState"):
+        plotting = state.toolbar.plotting
+        for i, visible in enumerate(self.visible_traces):
+            if i < len(plotting.line_show):
+                _safe_set(plotting.line_show[i], visible)
+
+    @classmethod
+    def from_state(cls, state: "VtState"):
+        plotting = state.toolbar.plotting
+        visible = []
+        for line_var in plotting.line_show:
+            try:
+                visible.append(line_var.get())
+            except Exception:
+                visible.append(False)
+        return cls(visible_traces=visible)
+
+
+@dataclass
 class MemorySettings(Configurator):
     num_plot_points: int = 500000
     num_data_points: int = 500000
@@ -294,6 +316,7 @@ class Config(Configurator):
     source: SourceSettings = field(default_factory=SourceSettings)
     pressure: PressureHardwareSettings = field(default_factory=PressureHardwareSettings)
     graph_axes: GraphAxisSettings = field(default_factory=GraphAxisSettings)
+    plotting: PlottingSettings = field(default_factory=PlottingSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
     pressure_control: PressureControlSettings = field(
         default_factory=PressureControlSettings

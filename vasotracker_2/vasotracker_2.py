@@ -4829,6 +4829,28 @@ class GraphFrame(ttk.Frame):
             x1, y1, label1, color1 = _metric_data(axis_settings.axis1_metric.get())
             x2, y2, label2, color2 = _metric_data(axis_settings.axis2_metric.get())
 
+            # Check which axes have visible data
+            ax1_has_data = len(x1) > 0 or any(plot_mask[i] and len(state.od_lines[i].x) > 0 for i in range(len(plot_mask)))
+            ax2_has_data = len(x2) > 0 or any(plot_mask[i] and len(state.id_lines[i].x) > 0 for i in range(len(plot_mask)))
+
+            # Show/hide axes based on whether they have data
+            self.ax1.set_visible(ax1_has_data)
+            self.ax1_markers.set_visible(ax1_has_data)
+            self.ax2.set_visible(ax2_has_data)
+            self.ax2_markers.set_visible(ax2_has_data)
+
+            # Adjust subplot layout based on which axes are visible
+            if ax1_has_data and ax2_has_data:
+                # Both axes visible - use normal 2-subplot layout
+                self.ax1.set_position([0.125, 0.53, 0.775, 0.37])
+                self.ax2.set_position([0.125, 0.11, 0.775, 0.37])
+            elif ax1_has_data:
+                # Only top axis visible - expand it to fill the space
+                self.ax1.set_position([0.125, 0.11, 0.775, 0.8])
+            elif ax2_has_data:
+                # Only bottom axis visible - expand it to fill the space
+                self.ax2.set_position([0.125, 0.11, 0.775, 0.8])
+
             # Clear existing vertical lines and annotations
             self.clear_markers()
 
