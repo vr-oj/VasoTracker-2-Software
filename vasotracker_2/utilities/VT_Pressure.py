@@ -101,6 +101,11 @@ class PressureController:
         self._hold_step_pending: bool = False
         self._hold_step_active: bool = False
 
+        # Serial port caching for faster connection
+        self._serial_ports_cache: Optional[List[Tuple[str, str]]] = None
+        self._serial_ports_cache_time: float = 0.0
+        self._serial_ports_cache_ttl: float = 30.0  # Cache for 30 seconds
+
         # Configure from persisted settings
         self.configure_from_state(start_immediately=False)
 
@@ -155,7 +160,23 @@ class PressureController:
         text = str(exc).strip()
         return text if text else exc.__class__.__name__
 
-    def _discover_serial_ports(self) -> List[Tuple[str, str]]:
+    def _discover_serial_ports(self, force_refresh: bool = False) -> List[Tuple[str, str]]:
+        """
+        Discover available serial ports with caching for better performance.
+
+        Args:
+            force_refresh: If True, bypass cache and scan ports immediately
+
+        Returns:
+            List of (device, description) tuples for available serial ports
+        """
+        # Check if we can use cached results
+        if not force_refresh and self._serial_ports_cache is not None:
+            cache_age = time.time() - self._serial_ports_cache_time
+            if cache_age < self._serial_ports_cache_ttl:
+                return self._serial_ports_cache
+
+        # Perform actual port discovery
         try:
             from serial.tools import list_ports
         except Exception:
@@ -167,11 +188,20 @@ class PressureController:
                 part for part in (info.manufacturer, info.description, info.hwid) if part
             ).strip()
             ports.append((info.device, description or info.device))
+
+        # Update cache
+        self._serial_ports_cache = ports
+        self._serial_ports_cache_time = time.time()
+
         return ports
 
     def list_serial_ports(self) -> List[Tuple[str, str]]:
         """Return a list of (device, description) tuples for available serial ports."""
         return self._discover_serial_ports()
+
+    def refresh_serial_ports(self) -> List[Tuple[str, str]]:
+        """Force a refresh of the serial port cache and return the updated list."""
+        return self._discover_serial_ports(force_refresh=True)
 
     def notify_status(self, message: str, *, persist: bool = False, log: bool = True) -> None:
         """Public helper for UI components that need to surface controller status messages."""
