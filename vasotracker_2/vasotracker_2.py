@@ -6494,7 +6494,7 @@ class Controller:
         now = datetime.now()
         savename = now.strftime("%Y%m%d") + "_Settings"
         path = filedialog.asksaveasfilename(
-            defaultextension=".toml", initialfile=savename, initialdir=os.getcwd
+            defaultextension=".toml", initialfile=savename, initialdir=os.getcwd()
         )
         if path == "":
             return
