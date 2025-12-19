@@ -171,7 +171,7 @@ class GraphAxisSettings(Configurator):
 
 @dataclass
 class PlottingSettings(Configurator):
-    visible_traces: list = field(default_factory=lambda: [False] * 25)
+    visible_traces: list = field(default_factory=lambda: [True] * 25)
 
     def set_values(self, state: "VtState"):
         plotting = state.toolbar.plotting
@@ -346,6 +346,11 @@ class Config(Configurator):
                 "ni_device": servo_data.get("device", "Dev1"),
                 "ni_ao_channel": servo_data.get("ao_channel", "ao1"),
                 "ni_scale": 0.01,
+            }
+        # Backwards compatibility: if plotting settings are missing, default to all traces visible
+        if "plotting" not in data:
+            data["plotting"] = {
+                "visible_traces": [True] * 25,
             }
         result = dacite.from_dict(data_class=cls, data=data)
         if isinstance(result.pressure, PressureHardwareSettings):
