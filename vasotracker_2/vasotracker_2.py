@@ -3175,7 +3175,7 @@ class GraphSettingsPane(ToolbarPane):
             padx=padx,
             pady=pady
         )
-        metric_options = ["Outer diameter", "Inner diameter", "Avg pressure"]
+        metric_options = ["Outer diameter", "Inner diameter", "Avg pressure", "None"]
         self.axis1_metric_menu = ctk.CTkOptionMenu(
             self,
             variable=sv.axis1_metric,
@@ -4820,18 +4820,20 @@ class GraphFrame(ttk.Frame):
 
             def _metric_data(choice: str):
                 key = (choice or "").lower()
+                if "none" in key or not key:
+                    return [], [], "None", hex_color_Cblue, None
                 if "inner" in key or key == "id":
-                    return state.id_avg.x, state.id_avg.y, "Inner Diameter (ID)", hex_color_Cgreen
+                    return state.id_avg.x, state.id_avg.y, "Inner Diameter (ID)", hex_color_Cgreen, "id"
                 if "press" in key:
-                    return state.pressure_avg.x, state.pressure_avg.y, "Avg Pressure (mmHg)", hex_color_pressure
-                return state.od_avg.x, state.od_avg.y, "Outer Diameter (OD)", hex_color_Cblue
+                    return state.pressure_avg.x, state.pressure_avg.y, "Avg Pressure (mmHg)", hex_color_pressure, "pressure"
+                return state.od_avg.x, state.od_avg.y, "Outer Diameter (OD)", hex_color_Cblue, "od"
 
-            x1, y1, label1, color1 = _metric_data(axis_settings.axis1_metric.get())
-            x2, y2, label2, color2 = _metric_data(axis_settings.axis2_metric.get())
+            x1, y1, label1, color1, type1 = _metric_data(axis_settings.axis1_metric.get())
+            x2, y2, label2, color2, type2 = _metric_data(axis_settings.axis2_metric.get())
 
-            # Check which axes have visible data
-            ax1_has_data = len(x1) > 0 or any(plot_mask[i] and len(state.od_lines[i].x) > 0 for i in range(len(plot_mask)))
-            ax2_has_data = len(x2) > 0 or any(plot_mask[i] and len(state.id_lines[i].x) > 0 for i in range(len(plot_mask)))
+            # Check which axes have visible data based on metric type
+            ax1_has_data = type1 is not None and (len(x1) > 0 or (type1 == "od" and any(plot_mask[i] and len(state.od_lines[i].x) > 0 for i in range(len(plot_mask)))) or (type1 == "id" and any(plot_mask[i] and len(state.id_lines[i].x) > 0 for i in range(len(plot_mask)))))
+            ax2_has_data = type2 is not None and (len(x2) > 0 or (type2 == "od" and any(plot_mask[i] and len(state.od_lines[i].x) > 0 for i in range(len(plot_mask)))) or (type2 == "id" and any(plot_mask[i] and len(state.id_lines[i].x) > 0 for i in range(len(plot_mask)))))
 
             # Show/hide axes based on whether they have data
             self.ax1.set_visible(ax1_has_data)
@@ -4879,15 +4881,41 @@ class GraphFrame(ttk.Frame):
                     self.id_lines[i].set_ydata([])
                     continue
 
-                self.od_lines[i].set_xdata(state.od_lines[i].x)
-                self.od_lines[i].set_ydata(state.od_lines[i].y)
-                self.od_lines[i].set_color(f"C{i}")
-                self.ax1.draw_artist(self.od_lines[i])
+                # Route OD traces based on which axis is showing OD
+                if type1 == "od":
+                    self.od_lines[i].set_xdata(state.od_lines[i].x)
+                    self.od_lines[i].set_ydata(state.od_lines[i].y)
+                    self.od_lines[i].set_color(f"C{i}")
+                    if ax1_has_data:
+                        self.ax1.draw_artist(self.od_lines[i])
+                elif type2 == "od":
+                    self.od_lines[i].set_xdata(state.od_lines[i].x)
+                    self.od_lines[i].set_ydata(state.od_lines[i].y)
+                    self.od_lines[i].set_color(f"C{i}")
+                    if ax2_has_data:
+                        # Draw on ax2 but need to handle this differently
+                        # For now, clear the data as OD lines object is bound to ax1
+                        self.od_lines[i].set_xdata([])
+                        self.od_lines[i].set_ydata([])
+                else:
+                    self.od_lines[i].set_xdata([])
+                    self.od_lines[i].set_ydata([])
 
-                self.id_lines[i].set_xdata(state.id_lines[i].x)
-                self.id_lines[i].set_ydata(state.id_lines[i].y)
-                self.id_lines[i].set_color(f"C{i}")
-                self.ax2.draw_artist(self.id_lines[i])
+                # Route ID traces based on which axis is showing ID
+                if type1 == "id":
+                    # Draw on ax1 but need to handle this differently
+                    # For now, clear the data as ID lines object is bound to ax2
+                    self.id_lines[i].set_xdata([])
+                    self.id_lines[i].set_ydata([])
+                elif type2 == "id":
+                    self.id_lines[i].set_xdata(state.id_lines[i].x)
+                    self.id_lines[i].set_ydata(state.id_lines[i].y)
+                    self.id_lines[i].set_color(f"C{i}")
+                    if ax2_has_data:
+                        self.ax2.draw_artist(self.id_lines[i])
+                else:
+                    self.id_lines[i].set_xdata([])
+                    self.id_lines[i].set_ydata([])
 
             
             #marker_coords = [state.od_avg.x[0], state.od_avg.x[len(state.od_avg.x) // 2], state.od_avg.x[-1]]
