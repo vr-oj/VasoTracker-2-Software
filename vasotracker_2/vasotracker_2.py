@@ -4831,25 +4831,34 @@ class GraphFrame(ttk.Frame):
             x1, y1, label1, color1, type1 = _metric_data(axis_settings.axis1_metric.get())
             x2, y2, label2, color2, type2 = _metric_data(axis_settings.axis2_metric.get())
 
-            # Check which axes have visible data based on metric type
-            ax1_has_data = type1 is not None and (len(x1) > 0 or (type1 == "od" and any(plot_mask[i] and len(state.od_lines[i].x) > 0 for i in range(len(plot_mask)))) or (type1 == "id" and any(plot_mask[i] and len(state.id_lines[i].x) > 0 for i in range(len(plot_mask)))))
-            ax2_has_data = type2 is not None and (len(x2) > 0 or (type2 == "od" and any(plot_mask[i] and len(state.od_lines[i].x) > 0 for i in range(len(plot_mask)))) or (type2 == "id" and any(plot_mask[i] and len(state.id_lines[i].x) > 0 for i in range(len(plot_mask)))))
+            # Check which axes have visible data
+            # Primary trace visibility (controlled by Graph Axes dialog)
+            ax1_has_primary = type1 is not None and len(x1) > 0
+            ax2_has_primary = type2 is not None and len(x2) > 0
 
-            # Show/hide axes based on whether they have data
-            self.ax1.set_visible(ax1_has_data)
-            self.ax1_markers.set_visible(ax1_has_data)
-            self.ax2.set_visible(ax2_has_data)
-            self.ax2_markers.set_visible(ax2_has_data)
+            # Multi-ROI trace visibility (controlled by Show/Hide Traces popup, separate from Graph Axes)
+            ax1_has_multi_roi = any(plot_mask[i] and len(state.od_lines[i].x) > 0 for i in range(len(plot_mask)))
+            ax2_has_multi_roi = any(plot_mask[i] and len(state.id_lines[i].x) > 0 for i in range(len(plot_mask)))
+
+            # Show axis if either primary OR multi-ROI traces are present
+            ax1_should_show = ax1_has_primary or ax1_has_multi_roi
+            ax2_should_show = ax2_has_primary or ax2_has_multi_roi
+
+            # Show/hide axes
+            self.ax1.set_visible(ax1_should_show)
+            self.ax1_markers.set_visible(ax1_should_show)
+            self.ax2.set_visible(ax2_should_show)
+            self.ax2_markers.set_visible(ax2_should_show)
 
             # Adjust subplot layout based on which axes are visible
-            if ax1_has_data and ax2_has_data:
+            if ax1_should_show and ax2_should_show:
                 # Both axes visible - use normal 2-subplot layout
                 self.ax1.set_position([0.125, 0.53, 0.775, 0.37])
                 self.ax2.set_position([0.125, 0.11, 0.775, 0.37])
-            elif ax1_has_data:
+            elif ax1_should_show:
                 # Only top axis visible - expand it to fill the space
                 self.ax1.set_position([0.125, 0.11, 0.775, 0.8])
-            elif ax2_has_data:
+            elif ax2_should_show:
                 # Only bottom axis visible - expand it to fill the space
                 self.ax2.set_position([0.125, 0.11, 0.775, 0.8])
 
@@ -4873,6 +4882,8 @@ class GraphFrame(ttk.Frame):
             self.markers.set_xdata(state.markers.x)
             self.markers.set_ydata(state.markers.y)
 
+            # Multi-ROI traces (separate from Graph Axes dialog - controlled by Show/Hide Traces popup)
+            # OD multi-ROI traces always on ax1, ID multi-ROI traces always on ax2
             for i, plot in enumerate(plot_mask):
                 if not plot:
                     self.od_lines[i].set_xdata([])
@@ -4881,41 +4892,17 @@ class GraphFrame(ttk.Frame):
                     self.id_lines[i].set_ydata([])
                     continue
 
-                # Route OD traces based on which axis is showing OD
-                if type1 == "od":
-                    self.od_lines[i].set_xdata(state.od_lines[i].x)
-                    self.od_lines[i].set_ydata(state.od_lines[i].y)
-                    self.od_lines[i].set_color(f"C{i}")
-                    if ax1_has_data:
-                        self.ax1.draw_artist(self.od_lines[i])
-                elif type2 == "od":
-                    self.od_lines[i].set_xdata(state.od_lines[i].x)
-                    self.od_lines[i].set_ydata(state.od_lines[i].y)
-                    self.od_lines[i].set_color(f"C{i}")
-                    if ax2_has_data:
-                        # Draw on ax2 but need to handle this differently
-                        # For now, clear the data as OD lines object is bound to ax1
-                        self.od_lines[i].set_xdata([])
-                        self.od_lines[i].set_ydata([])
-                else:
-                    self.od_lines[i].set_xdata([])
-                    self.od_lines[i].set_ydata([])
+                # OD multi-ROI traces always on ax1 (regardless of primary trace metric)
+                self.od_lines[i].set_xdata(state.od_lines[i].x)
+                self.od_lines[i].set_ydata(state.od_lines[i].y)
+                self.od_lines[i].set_color(f"C{i}")
+                self.ax1.draw_artist(self.od_lines[i])
 
-                # Route ID traces based on which axis is showing ID
-                if type1 == "id":
-                    # Draw on ax1 but need to handle this differently
-                    # For now, clear the data as ID lines object is bound to ax2
-                    self.id_lines[i].set_xdata([])
-                    self.id_lines[i].set_ydata([])
-                elif type2 == "id":
-                    self.id_lines[i].set_xdata(state.id_lines[i].x)
-                    self.id_lines[i].set_ydata(state.id_lines[i].y)
-                    self.id_lines[i].set_color(f"C{i}")
-                    if ax2_has_data:
-                        self.ax2.draw_artist(self.id_lines[i])
-                else:
-                    self.id_lines[i].set_xdata([])
-                    self.id_lines[i].set_ydata([])
+                # ID multi-ROI traces always on ax2 (regardless of primary trace metric)
+                self.id_lines[i].set_xdata(state.id_lines[i].x)
+                self.id_lines[i].set_ydata(state.id_lines[i].y)
+                self.id_lines[i].set_color(f"C{i}")
+                self.ax2.draw_artist(self.id_lines[i])
 
             
             #marker_coords = [state.od_avg.x[0], state.od_avg.x[len(state.od_avg.x) // 2], state.od_avg.x[-1]]
