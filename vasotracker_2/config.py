@@ -135,6 +135,8 @@ class GraphAxisSettings(Configurator):
     y_max1: float = 250.0
     y_min2: float = 25.0
     y_max2: float = 200.0
+    y_min_p: float = 0.0
+    y_max_p: float = 200.0
     axis1_metric: str = "Outer diameter"
     axis2_metric: str = "Inner diameter"
 
@@ -146,6 +148,8 @@ class GraphAxisSettings(Configurator):
         _safe_set(g.y_max_od, self.y_max1)
         _safe_set(g.y_min_id, self.y_min2)
         _safe_set(g.y_max_id, self.y_max2)
+        _safe_set(g.y_min_p, self.y_min_p)
+        _safe_set(g.y_max_p, self.y_max_p)
         _safe_set(g.axis1_metric, self.axis1_metric)
         _safe_set(g.axis2_metric, self.axis2_metric)
     @classmethod
@@ -158,6 +162,8 @@ class GraphAxisSettings(Configurator):
             y_max1=g.y_max_od.get(),
             y_min2=g.y_min_id.get(),
             y_max2=g.y_max_id.get(),
+            y_min_p=g.y_min_p.get(),
+            y_max_p=g.y_max_p.get(),
             axis1_metric=g.axis1_metric.get(),
             axis2_metric=g.axis2_metric.get(),
         )

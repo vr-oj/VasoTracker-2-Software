@@ -436,6 +436,8 @@ class GraphPaneState:
     y_max_od: IntVar = field(default_factory=IntVar)
     y_min_id: IntVar = field(default_factory=IntVar)
     y_max_id: IntVar = field(default_factory=IntVar)
+    y_min_p: IntVar = field(default_factory=IntVar)
+    y_max_p: IntVar = field(default_factory=IntVar)
     axis1_metric: StringVar = field(default_factory=lambda: StringVar(value="Outer diameter"))
     axis2_metric: StringVar = field(default_factory=lambda: StringVar(value="Inner diameter"))
     dirty: BooleanVar = field(default_factory=BooleanVar)
@@ -3103,8 +3105,9 @@ class GraphSettingsPane(ToolbarPane):
         ctk.CTkLabel(self, text="Time:", font=(default_font, default_font_size)).grid(row=2, column=0, sticky=tk.E, padx=padx, pady=pady)
         ctk.CTkLabel(self, text="OD:", font=(default_font, default_font_size)).grid(row=3, column=0, sticky=tk.E, padx=padx, pady=pady)
         ctk.CTkLabel(self, text="ID:", font=(default_font, default_font_size)).grid(row=4, column=0, sticky=tk.E, padx=padx, pady=pady)
-        ctk.CTkLabel(self, text="Left trace:", font=(default_font, default_font_size)).grid(row=5, column=0, sticky=tk.E, padx=padx, pady=pady)
-        ctk.CTkLabel(self, text="Right trace:", font=(default_font, default_font_size)).grid(row=6, column=0, sticky=tk.E, padx=padx, pady=pady)
+        ctk.CTkLabel(self, text="P:", font=(default_font, default_font_size)).grid(row=5, column=0, sticky=tk.E, padx=padx, pady=pady)
+        ctk.CTkLabel(self, text="Top trace:", font=(default_font, default_font_size)).grid(row=6, column=0, sticky=tk.E, padx=padx, pady=pady)
+        ctk.CTkLabel(self, text="Bottom trace:", font=(default_font, default_font_size)).grid(row=7, column=0, sticky=tk.E, padx=padx, pady=pady)
 
         graphaxes_entry_width = 75
 
@@ -3175,6 +3178,28 @@ class GraphSettingsPane(ToolbarPane):
             padx=padx,
             pady=pady
         )
+        self.y_min_p_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=sv.y_min_p,
+            font=(default_font, default_font_size),
+            fg_color = "white",
+            width=graphaxes_entry_width,
+            row=5,
+            column=1,
+            padx=padx,
+            pady=pady
+        )
+        self.y_max_p_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=sv.y_max_p,
+            font=(default_font, default_font_size),
+            fg_color = "white",
+            width=graphaxes_entry_width,
+            row=5,
+            column=2,
+            padx=padx,
+            pady=pady
+        )
         metric_options = ["Outer diameter", "Inner diameter", "Avg pressure", "None"]
         self.axis1_metric_menu = ctk.CTkOptionMenu(
             self,
@@ -3190,7 +3215,7 @@ class GraphSettingsPane(ToolbarPane):
             dropdown_text_color=entry_text_color,
             text_color=entry_text_color,
         )
-        self.axis1_metric_menu.grid(row=5, column=1, columnspan=2, padx=padx, pady=pady, sticky="ew")
+        self.axis1_metric_menu.grid(row=6, column=1, columnspan=2, padx=padx, pady=pady, sticky="ew")
 
         self.axis2_metric_menu = ctk.CTkOptionMenu(
             self,
@@ -3206,12 +3231,12 @@ class GraphSettingsPane(ToolbarPane):
             dropdown_text_color=entry_text_color,
             text_color=entry_text_color,
         )
-        self.axis2_metric_menu.grid(row=6, column=1, columnspan=2, padx=padx, pady=pady, sticky="ew")
+        self.axis2_metric_menu.grid(row=7, column=1, columnspan=2, padx=padx, pady=pady, sticky="ew")
 
         self.set_button = ctk.CTkButton(self, width=70, text="Set", font=(default_font, default_font_size),text_color="black")
-        self.set_button.grid(row=7, column=1, padx=padx, pady=pady)
+        self.set_button.grid(row=8, column=1, padx=padx, pady=pady)
         self.default_button = ctk.CTkButton(self, width=70, text="Default", font=(default_font, default_font_size), text_color="black")
-        self.default_button.grid(row=7, column=2, padx=padx, pady=pady)
+        self.default_button.grid(row=8, column=2, padx=padx, pady=pady)
 
         sv.axis1_metric.trace_add("write", lambda *args: self._on_metric_change())
         sv.axis2_metric.trace_add("write", lambda *args: self._on_metric_change())
@@ -4716,6 +4741,7 @@ class GraphFrame(ttk.Frame):
         self.xlim = (settings.x_min.get(), settings.x_max.get())
         self.ylim_id = (settings.y_min_id.get(), settings.y_max_id.get())
         self.ylim_od = (settings.y_min_od.get(), settings.y_max_od.get())
+        self.ylim_p = (settings.y_min_p.get(), settings.y_max_p.get())
 
         self.setup_widgets()
         self.update_lims()
@@ -4991,14 +5017,28 @@ class GraphFrame(ttk.Frame):
         self.xlim = (settings.x_min.get(), settings.x_max.get())
         self.ylim_id = (settings.y_min_id.get(), settings.y_max_id.get())
         self.ylim_od = (settings.y_min_od.get(), settings.y_max_od.get())
+        self.ylim_p = (settings.y_min_p.get(), settings.y_max_p.get())
+
+        # Determine which y-limits to use for each axis based on the selected metric
+        def _get_ylim(metric_choice):
+            key = (metric_choice or "").lower()
+            if "inner" in key or key == "id":
+                return self.ylim_id
+            elif "press" in key:
+                return self.ylim_p
+            else:  # Default to OD for "outer diameter" or None
+                return self.ylim_od
+
+        ax1_ylim = _get_ylim(settings.axis1_metric.get())
+        ax2_ylim = _get_ylim(settings.axis2_metric.get())
 
         self.ax1.set_xlim(*self.xlim)
-        self.ax1.set_ylim(*self.ylim_od)
+        self.ax1.set_ylim(*ax1_ylim)
         self.ax2.set_xlim(*self.xlim)
-        self.ax2.set_ylim(*self.ylim_id)
+        self.ax2.set_ylim(*ax2_ylim)
 
-        self.ax1_markers.set_ylim(*self.ylim_od)
-        self.ax2_markers.set_ylim(*self.ylim_id)
+        self.ax1_markers.set_ylim(*ax1_ylim)
+        self.ax2_markers.set_ylim(*ax2_ylim)
 
         # After setting up your initial plot and axes limits
         self.figure.canvas.draw()  # Draw the canvas with the initial plot
