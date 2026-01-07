@@ -15,17 +15,17 @@ sys.path.insert(0, spec_dir)
 import version
 from version import __version__
 
-added_files = [("music", "music"), ("images", "images"), ("SampleData", "SampleData"), ('settings.toml', '.'), ('MMConfig.cfg', '.'), ('Basler.cfg', '.'), ('VasoTrackerblue.json', '.'), ('pacman', 'pacman'), ('space-invaders', 'space-invaders')]
+added_files = [("music", "music"), ("images", "images"), ("SampleData2", "SampleData2"), ('settings.toml', '.'), ('MMConfig.cfg', '.'), ('Basler.cfg', '.'), ('VasoTrackerblue.json', '.')]
 
 a = Analysis(
     ['vasotracker_2.py'],
-    pathex=[],
+    pathex=[spec_dir],
     binaries=[],
     datas=added_files,
-    hiddenimports=['PyDAQmx', 'scipy'],
+    hiddenimports=['PyDAQmx', 'scipy', 'version'],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[os.path.join(spec_dir, "pyinstaller_hooks", "filter_pkg_resources_warning.py")],
     excludes=[],
     noarchive=False,
 )
@@ -48,7 +48,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     uac_admin=True,
-    icon='D:\\OneDrive - University of Strathclyde\\Documents\\GitHub\\VasoTracker-2-Software\\vasotracker_2\\images\\vt_icon.ico',
+    icon = os.path.join(spec_dir, "images", "vt_icon.ico")
 )
 coll = COLLECT(
     exe,

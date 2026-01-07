@@ -3,8 +3,8 @@ pixel_world_scale = 1.0
 exposure = 50
 pixel_clock = 10
 recording_interval = 300.0
-refresh_min_interval = 0.2
-refresh_faster_interval = 0.01
+refresh_min_interval = 0.01
+refresh_faster_interval = 0.001
 
 [analysis]
 num_lines = 10
@@ -13,9 +13,16 @@ integration = 20
 threshold = 5.5
 num_threads = 1
 
-[servo]
-device = "Dev1"
-ao_channel = "ao1"
+[source]
+file_fps = 1.0
+
+[pressure]
+device = "VasoMoto"
+port = "COM3"
+baud = 115200
+ni_device = "Dev1"
+ni_ao_channel = "ao1"
+ni_scale = 0.01
 
 [graph_axes]
 x_min = -1200.0

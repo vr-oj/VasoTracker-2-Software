@@ -1,268 +1,774 @@
-##################################################
-## VasoTracker 2 - Blood Vessel Diameter Measurement Software
-##
-## Author: Calum Wilson, Matthew D Lee, and Chris Osborne
-## License: BSD 3-Clause License (See main file for details)
-## Website: www.vasostracker.com
-##
-##################################################
+# #################################################
+# # VasoTracker 2 - Blood Vessel Diameter Measurement Software
+# #
+# # Author: Calum Wilson, Matthew D Lee, and Chris Osborne
+# # License: BSD 3-Clause License (See main file for details)
+# # Website: www.vasostracker.com
+# #
+# #################################################
 
+from __future__ import annotations
 
-## We found the following to be useful:
-## https://www.safaribooksonline.com/library/view/python-cookbook/0596001673/ch09s07.html
-## http://code.activestate.com/recipes/82965-threads-tkinter-and-asynchronous-io/
-## https://www.physics.utoronto.ca/~phy326/python/Live_Plot.py
-## http://forum.arduino.cc/index.php?topic=225329.msg1810764#msg1810764
-## https://stackoverflow.com/questions/9917280/using-draw-in-pil-tkinter
-## https://stackoverflow.com/questions/37334106/opening-image-on-canvas-cropping-the-image-and-update-the-canvas
-
-import sys
-import os
-import time
+from dataclasses import dataclass
 from datetime import timedelta
+from typing import Callable, Dict, List, Optional, Tuple
+import math
+import time
 import tkinter.messagebox as tmb
+from tkinter import TclError
 
-#########################################################################################
-# Calum trying to sort out the National Instruments problem....
-#########################################################################################
-'''
-def get_resource_path(relative_path):
-    """Get the path to a resource, whether it's bundled with PyInstaller or not."""
-    base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
-    return os.path.join(base_path, relative_path)
-
-
-
-# If running as an exe, then get the included nidaqmax.h file location
-if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-    # running in a PyInstaller bundle
-    header_dir = os.path.join(sys._MEIPASS, 'include')
-else:
-    # running in a normal Python environment
-    # This is wrong, but it won't matter because I set the DAQmxConfig.py to check the header_dir last.
-    header_dir = os.path.join(os.getcwd(), 'include')
-print("header_dir = ", header_dir)
-
-os.environ['NIDAQMX_INCLUDE_PATH'] = header_dir
-print("NIDAQMX_INCLUDE_PATH set to:", os.environ['NIDAQMX_INCLUDE_PATH'])
-
-from PyDAQmx.DAQmxConfig import is_pydaqmx_installed
-print(f"PyDAQmx installed: {is_pydaqmx_installed()}")
-
-'''
+from .pressure_devices import (
+    ArduinoPressureDevice,
+    NullPressureDevice,
+    NIDaqPressureDevice,
+    PressureDevice,
+    SimPressureDevice,
+)
+from .VT_Arduino import Arduino
+from .arduino_async_worker import ArduinoSerialWorker
+from .arduino_link_monitor import LinkMonitor
 try:
-    import PyDAQmx
-    from PyDAQmx import *
-    pydaqmx_available = True
-except:
-    pydaqmx_available = False
-
-def is_pydaqmx_available():
-    return pydaqmx_available
-
-pydaqmx_available = True
+    from ..setpoint_bus import notify_setpoint, broadcast_setpoint
+except ImportError:
+    from setpoint_bus import notify_setpoint, broadcast_setpoint
 
 
-#########################################################################################
-# End of Calum trying to sort out the National Instruments problem....
-#########################################################################################
+def is_pydaqmx_available() -> bool:
+    try:
+        import PyDAQmx  # noqa: F401
+
+        return True
+    except Exception:
+        return False
 
 
+def _safe_mean(values) -> Optional[float]:
+    filtered = [v for v in values if v is not None and not math.isnan(v)]
+    if not filtered:
+        return None
+    return sum(filtered) / len(filtered)
 
 
+@dataclass
+class DeviceContext:
+    """Book-keeping for the active hardware backend."""
+
+    device: PressureDevice
+    type_name: str
+    arduino: Optional[Arduino] = None
+    worker: Optional[ArduinoSerialWorker] = None
+    monitor: Optional[LinkMonitor] = None
+    nidaq_task: Optional["PyDAQmx.Task"] = None  # type: ignore[name-defined]
 
 
 class PressureController:
-    def __init__(self, model, view, pydaqmx_available):
+    """
+    High-level pressure controller that abstracts away hardware differences.
+
+    The controller orchestrates protocol execution, updates UI state, and routes
+    pressure commands/telemetry through a selected `PressureDevice` instance.
+    """
+
+    def __init__(self, model, view) -> None:
         self.model = model
         self.view = view
-        self.pydaqmx_available = pydaqmx_available
-        self.task = None
-        #self.initialize_pressure_system()
-        self.start_pressure = None
-        self.stop_pressure = None
-        self.pressure_interval = None
-        self.pressure_time_interval = None
-        self.set_pressure = None
-        self.pressure_start_time = None
-        self.multiplier = 1
-        self.last_update_time = None
-        self.update_threshold = 1  # Minimum time interval in seconds between updates
-    
-    def end_protocol(self):
+
+        self._device_ctx = DeviceContext(NullPressureDevice(), "none")
+        self._latest: Tuple[Optional[float], Optional[float], Optional[float]] = (
+            None,
+            None,
+            None,
+        )
+
+        # Pressure protocol state
+        self.start_pressure: Optional[float] = None
+        self.stop_pressure: Optional[float] = None
+        self.pressure_interval: Optional[float] = None
+        self.pressure_time_interval: Optional[float] = None
+        self.pressure_start_time: Optional[float] = None
+        self.next_pressure_update_time: float = 0.0
+        self.multiplier: int = 1
+        self._direction: int = 0
+        self.protocol_completed: bool = False
+        self.stop_protocol_on_completion: bool = True
+        self.completed: bool = False
+        self.last_update_time: Optional[float] = None
+        self.update_threshold: float = 1.0
+        self.set_pressure: float = 0.0
+        self._last_broadcast_device_sp: Optional[float] = None
+        self._status_reset_job: Optional[str] = None
+        self._default_status_text = self._capture_status_text()
+        self._hold_step_pending: bool = False
+        self._hold_step_active: bool = False
+
+        # Serial port caching for faster connection
+        self._serial_ports_cache: Optional[List[Tuple[str, str]]] = None
+        self._serial_ports_cache_time: float = 0.0
+        self._serial_ports_cache_ttl: float = 30.0  # Cache for 30 seconds
+
+        # Configure from persisted settings
+        self.configure_from_state(start_immediately=False)
+
+    # ------------------------------------------------------------------
+    # Device configuration
+    # ------------------------------------------------------------------
+    def _capture_status_text(self) -> str:
+        status_bar = getattr(self.view, "status_bar", None)
+        if status_bar is None:
+            return ""
+        try:
+            return str(status_bar.cget("text"))
+        except Exception:
+            return ""
+
+    def _notify_status(self, message: str, *, persist: bool = False, log: bool = True) -> None:
+        if log:
+            print(f"[PressureController] {message}")
+
+        status_bar = getattr(self.view, "status_bar", None)
+        if status_bar is None:
+            return
+
+        try:
+            status_bar.configure(text=message)
+        except Exception:
+            return
+
+        if persist or not self._default_status_text:
+            self._status_reset_job = None
+            return
+
+        if self._status_reset_job is not None:
+            try:
+                status_bar.after_cancel(self._status_reset_job)
+            except Exception:
+                pass
+            self._status_reset_job = None
+
+        def _reset_status() -> None:
+            try:
+                status_bar.configure(text=self._default_status_text)
+            except Exception:
+                pass
+            finally:
+                self._status_reset_job = None
+
+        self._status_reset_job = status_bar.after(8000, _reset_status)
+
+    @staticmethod
+    def _summarise_exception(exc: Exception) -> str:
+        text = str(exc).strip()
+        return text if text else exc.__class__.__name__
+
+    def _discover_serial_ports(self, force_refresh: bool = False) -> List[Tuple[str, str]]:
+        """
+        Discover available serial ports with caching for better performance.
+
+        Args:
+            force_refresh: If True, bypass cache and scan ports immediately
+
+        Returns:
+            List of (device, description) tuples for available serial ports
+        """
+        # Check if we can use cached results
+        if not force_refresh and self._serial_ports_cache is not None:
+            cache_age = time.time() - self._serial_ports_cache_time
+            if cache_age < self._serial_ports_cache_ttl:
+                return self._serial_ports_cache
+
+        # Perform actual port discovery
+        try:
+            from serial.tools import list_ports
+        except Exception:
+            return []
+
+        ports: List[Tuple[str, str]] = []
+        for info in list_ports.comports():
+            description = " ".join(
+                part for part in (info.manufacturer, info.description, info.hwid) if part
+            ).strip()
+            ports.append((info.device, description or info.device))
+
+        # Update cache
+        self._serial_ports_cache = ports
+        self._serial_ports_cache_time = time.time()
+
+        return ports
+
+    def list_serial_ports(self) -> List[Tuple[str, str]]:
+        """Return a list of (device, description) tuples for available serial ports."""
+        return self._discover_serial_ports()
+
+    def refresh_serial_ports(self) -> List[Tuple[str, str]]:
+        """Force a refresh of the serial port cache and return the updated list."""
+        return self._discover_serial_ports(force_refresh=True)
+
+    def notify_status(self, message: str, *, persist: bool = False, log: bool = True) -> None:
+        """Public helper for UI components that need to surface controller status messages."""
+        self._notify_status(message, persist=persist, log=log)
+
+    def _dispatch_to_ui(self, func: Callable[[], None]) -> None:
+        """Execute `func` on the UI thread if possible."""
+        status_bar = getattr(self.view, "status_bar", None)
+        if status_bar is not None:
+            try:
+                status_bar.after(0, func)
+                return
+            except Exception:
+                pass
+        after = getattr(self.view, "after", None)
+        if callable(after):
+            try:
+                after(0, func)
+                return
+            except Exception:
+                pass
+        func()
+
+    def _notify_status_async(self, message: str, *, persist: bool = False, log: bool = True) -> None:
+        """Thread-safe wrapper around `_notify_status`."""
+        self._dispatch_to_ui(lambda m=message, p=persist, l=log: self._notify_status(m, persist=p, log=l))
+
+    @staticmethod
+    def _var_to_float(var, default: float = 0.0) -> float:
+        """Safely extract a float from a Tk variable, tolerating blanks."""
+        if var is None:
+            return default
+        try:
+            value = var.get()
+        except TclError:
+            return default
+        except Exception:
+            return default
+        if isinstance(value, str):
+            value = value.strip()
+            if value == "":
+                return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _set_var_safe(var, value) -> None:
+        """Attempt to set a Tk variable, ignoring stale widget callbacks."""
+        if var is None:
+            return
+        try:
+            var.set(value)
+        except TclError:
+            pass
+        except Exception:
+            pass
+
+    def configure_from_state(self, start_immediately: bool = False) -> None:
+        """Reconfigure the active device based on toolbar/settings state."""
+        settings = getattr(self.model.state.toolbar, "pressure_device", None)
+        if settings is None:
+            # Fallback to previous servo settings to avoid crashing on partial upgrades.
+            settings = getattr(self.model.state.toolbar, "servo", None)
+        if settings is None:
+            self._set_device(NullPressureDevice(), "none")
+            return
+
+        device_type = str(settings.device_type.get() if hasattr(settings, "device_type") else "").strip().lower()
+
+        if device_type in ("arduino", "vasomoto"):
+            port = getattr(settings, "port", None)
+            baud = getattr(settings, "baud", None)
+            try:
+                port_value = port.get() if port is not None else ""
+                baud_value = int(baud.get()) if baud is not None else 115200
+            except Exception:
+                port_value = ""
+                baud_value = 115200
+            self._setup_arduino_device(port_value, baud_value, start_immediately=start_immediately)
+        elif device_type in ("sim", "simulation"):
+            device = SimPressureDevice()
+            self._set_device(device, "sim")
+            if start_immediately:
+                device.start()
+        elif device_type in ("ni", "ni-daq", "nidaq"):
+            device = self._setup_nidaq_device(settings)
+            self._set_device(device, "nidaq")
+            if start_immediately:
+                device.start()
+        else:
+            self._set_device(NullPressureDevice(), "none")
+
+    def _set_device(
+        self,
+        device: PressureDevice,
+        type_name: str,
+        *,
+        arduino: Optional[Arduino] = None,
+        worker: Optional[ArduinoSerialWorker] = None,
+        monitor: Optional[LinkMonitor] = None,
+        nidaq_task: Optional["PyDAQmx.Task"] = None,  # type: ignore[name-defined]
+    ) -> None:
+        ctx = self._device_ctx
+        try:
+            ctx.device.stop()
+        except Exception:
+            pass
+        if ctx.worker is not None:
+            try:
+                ctx.worker.stop()
+            except Exception:
+                pass
+        if ctx.arduino is not None:
+            try:
+                ctx.arduino.close()
+            except Exception:
+                pass
+        if ctx.nidaq_task is not None:
+            try:
+                ctx.nidaq_task.StopTask()
+            except Exception:
+                pass
+            try:
+                ctx.nidaq_task.ClearTask()
+            except Exception:
+                pass
+
+        self._device_ctx = DeviceContext(
+            device=device,
+            type_name=type_name,
+            arduino=arduino,
+            worker=worker,
+            monitor=monitor,
+            nidaq_task=nidaq_task,
+        )
+
+        toolbar = getattr(self.view, "toolbar", None)
+        if toolbar is not None:
+            try:
+                if type_name == "none":
+                    toolbar.pressure_protocol_settings.set_lock_state()
+                    toolbar.pressure_control_settings.set_lock_state()
+                else:
+                    toolbar.pressure_protocol_settings.set_unlock_state()
+                    toolbar.pressure_control_settings.set_unlock_state()
+            except Exception:
+                pass
+
+    def _setup_arduino_device(self, port: str, baud: int, start_immediately: bool = False) -> None:
+        requested = (port or "").strip()
+        auto_detect = requested.lower() in ("", "auto", "autodetect", "detect")
+        discovered = self._discover_serial_ports()
+
+        if not discovered and auto_detect:
+            self._set_device(NullPressureDevice(), "none")
+            self._notify_status(
+                "No serial ports detected. Connect the VasoMoto controller and try again.",
+                persist=True,
+            )
+            return
+
+        monitor = LinkMonitor(expected_rx_hz=5.0, warmup_s=1.2, stale_s=2.5)
+        device = ArduinoPressureDevice(worker=None)
+        last_status: Dict[str, Optional[str]] = {"event": None}
+
+        def update_port_variable(device_name: str) -> None:
+            def setter() -> None:
+                try:
+                    self.model.state.toolbar.pressure_device.port.set(device_name)
+                except Exception:
+                    pass
+
+            self._dispatch_to_ui(setter)
+
+        def status_callback(event: str, info: dict) -> None:
+            port_name = info.get("port") or (requested if requested else "auto")
+            # Reduce chatter for repeated states.
+            if event == last_status["event"] and event not in ("error", "stale", "healthy"):
+                return
+            last_status["event"] = event
+
+            if event == "connecting":
+                self._notify_status_async(f"Connecting to VasoMoto on {port_name}...", log=False)
+            elif event == "open":
+                self._notify_status_async(f"Serial port {port_name} opened.", log=False)
+                actual_port = info.get("port")
+                if actual_port:
+                    update_port_variable(actual_port)
+            elif event == "syncing":
+                self._notify_status_async(
+                    f"Waiting for VasoMoto telemetry ({port_name})...", log=False
+                )
+            elif event == "healthy":
+                hz = info.get("rx_hz")
+                if hz:
+                    self._notify_status_async(
+                        f"VasoMoto telemetry active ({hz:.1f} Hz).",
+                        log=False,
+                    )
+                else:
+                    self._notify_status_async("VasoMoto telemetry active.", log=False)
+            elif event == "stale":
+                age = info.get("age")
+                if age:
+                    self._notify_status_async(
+                        f"VasoMoto telemetry stale ({age:.1f}s gap).",
+                        log=False,
+                    )
+                else:
+                    self._notify_status_async("VasoMoto telemetry stale.", log=False)
+            elif event == "error":
+                message = info.get("message") or "Unknown error"
+                self._notify_status_async(
+                    f"VasoMoto error on {port_name}: {message}",
+                    persist=True,
+                )
+            elif event == "closed":
+                self._notify_status_async(f"VasoMoto connection closed ({port_name}).", log=False)
+
+        worker = ArduinoSerialWorker(
+            port=None if auto_detect else requested,
+            baud=baud,
+            monitor=monitor,
+            line_callback=device.handle_line,
+            status_callback=status_callback,
+        )
+        device.bind_worker(worker)
+        self._set_device(device, "vasomoto", worker=worker, monitor=monitor)
+
+        if not discovered and not auto_detect:
+            self._notify_status_async(
+                f"Serial port {requested} not detected. The worker will keep retrying.",
+                persist=True,
+            )
+
+        if start_immediately:
+            try:
+                device.start()
+            except Exception as exc:
+                self._notify_status_async(
+                    f"Failed to start VasoMoto telemetry: {self._summarise_exception(exc)}",
+                    persist=True,
+                )
+                print("Failed to start VasoMoto pressure device:", exc)
+
+    def _setup_nidaq_device(self, settings) -> PressureDevice:
+        if not is_pydaqmx_available():
+            tmb.showinfo(
+                "NI-DAQ unavailable",
+                "PyDAQmx is not installed; reverting to Null pressure device.",
+            )
+            null_device = NullPressureDevice()
+            self._set_device(null_device, "none")
+            return null_device
+
+        try:
+            import PyDAQmx
+        except Exception as exc:  # pragma: no cover - defensive
+            print("Failed to import PyDAQmx:", exc)
+            null_device = NullPressureDevice()
+            self._set_device(null_device, "none")
+            return null_device
+
+        device_name = getattr(settings, "ni_device", getattr(settings, "device", None))
+        ao_channel = getattr(settings, "ni_ao_channel", getattr(settings, "ao_channel", None))
+        try:
+            device_value = device_name.get() if device_name is not None else ""
+            channel_value = ao_channel.get() if ao_channel is not None else ""
+        except Exception:
+            device_value = ""
+            channel_value = ""
+
+        if not device_value or not channel_value:
+            tmb.showinfo(
+                "NI-DAQ configuration",
+                "Please select both a device and an analog output channel for NI-DAQ control.",
+            )
+            null_device = NullPressureDevice()
+            self._set_device(null_device, "none")
+            return null_device
+
+        nidaq_task = PyDAQmx.Task()
+        try:
+            nidaq_task.CreateAOVoltageChan(
+                f"/{device_value}/{channel_value}",
+                "",
+                -10.0,
+                10.0,
+                PyDAQmx.DAQmx_Val_Volts,
+                None,
+            )
+            nidaq_task.StartTask()
+        except Exception as exc:
+            print("Failed to initialise NI-DAQ task:", exc)
+            tmb.showinfo(
+                "NI-DAQ connection failed",
+                "Cannot connect to NI device. Please verify the hardware configuration.",
+            )
+            try:
+                nidaq_task.ClearTask()
+            except Exception:
+                pass
+            null_device = NullPressureDevice()
+            self._set_device(null_device, "none")
+            return null_device
+
+        scale = getattr(settings, "ni_scale", None)
+        try:
+            scale_value = float(scale.get()) if scale is not None else 0.01
+        except Exception:
+            scale_value = 0.01
+
+        device = NIDaqPressureDevice(ai_task=None, ao_task=nidaq_task, scale=scale_value)
+        self._set_device(device, "nidaq", nidaq_task=nidaq_task)
+        return device
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def start(self) -> None:
+        try:
+            self._device_ctx.device.start()
+        except Exception as exc:
+            print("Pressure device start failed:", exc)
+
+    def stop(self) -> None:
+        try:
+            self._device_ctx.device.stop()
+        except Exception as exc:
+            print("Pressure device stop failed:", exc)
+
+    def adjust_pressure(self, pressure_value_mmHg: float, update_table: bool = True) -> None:
+        value = max(0.0, min(200.0, float(pressure_value_mmHg)))
+
+        self.set_pressure = value
+        pressure_protocol_settings = self.model.state.toolbar.pressure_protocol
+        self._set_var_safe(pressure_protocol_settings.set_pressure, f"{value:.1f}")
+
+        handled = notify_setpoint(value, source="PressureController")
+        if not handled:
+            try:
+                self._device_ctx.device.set_pressure(value)
+            except Exception as exc:
+                print("set_pressure failed:", exc)
+
+        if update_table:
+            try:
+                self.model.state.table.label.set(f"Set pressure = {value} mmHg")
+                self.model.add_table_row()
+            except Exception:
+                pass
+
+    def poll_latest(self) -> None:
+        self._latest = self._device_ctx.device.read_latest()
+        p1, p2, sp = self._latest
+        tb = self.model.state.toolbar
+
+        avg = _safe_mean([p1, p2])
+        try:
+            if avg is not None:
+                tb.data_acq.pressure.set(round(avg, 1))
+            if p1 is not None and hasattr(tb.data_acq, "pressure1"):
+                tb.data_acq.pressure1.set(round(p1, 1))
+            if p2 is not None and hasattr(tb.data_acq, "pressure2"):
+                tb.data_acq.pressure2.set(round(p2, 1))
+        except Exception:
+            pass
+
+        if sp is not None:
+            try:
+                numeric_sp = float(sp)
+            except (TypeError, ValueError):
+                numeric_sp = None
+            else:
+                if numeric_sp is not None and not math.isnan(numeric_sp):
+                    protocol_formatted = f"{numeric_sp:.1f}"
+                    device_formatted = f"{numeric_sp:.1f}"
+                    self._set_var_safe(tb.pressure_protocol.set_pressure, protocol_formatted)
+                    device_set_var = getattr(tb.pressure_protocol, "device_set_pressure", None)
+                    if device_set_var is not None:
+                        self._set_var_safe(device_set_var, device_formatted)
+                    device_source_var = getattr(tb.pressure_protocol, "device_set_source", None)
+                    if device_source_var is not None:
+                        self._set_var_safe(device_source_var, "device")
+                    data_acq_device_var = getattr(tb.data_acq, "device_set_pressure", None)
+                    if data_acq_device_var is not None:
+                        self._set_var_safe(data_acq_device_var, device_formatted)
+                    self.set_pressure = numeric_sp
+                    if (
+                        self._last_broadcast_device_sp is None
+                        or abs(numeric_sp - self._last_broadcast_device_sp) > 1e-3
+                    ):
+                        try:
+                            broadcast_setpoint(numeric_sp, "device")
+                        except Exception:
+                            pass
+                        self._last_broadcast_device_sp = numeric_sp
+
+    def get_latest(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        return self._latest
+
+    def active_device_type(self) -> str:
+        """Return the lowercase name of the currently active pressure device."""
+        return str(self._device_ctx.type_name or "").lower()
+
+    def link_monitor(self) -> Optional[LinkMonitor]:
+        """Expose the VasoMoto link monitor (if available) for UI badges."""
+        return self._device_ctx.monitor
+
+    # ------------------------------------------------------------------
+    # Protocol handling (largely retained from previous implementation)
+    # ------------------------------------------------------------------
+    def end_protocol(self) -> None:
         try:
             self.view.toolbar.pressure_control_settings.toggle_protocol_button()
-        except Exception as e:
-            print(f"Error in end_protocol: {e}")
+        except Exception as exc:
+            print(f"Error in end_protocol: {exc}")
 
-
-
-    def initialize_pressure_system(self):
-        if self.pydaqmx_available:
-            self.task = PyDAQmx.Task()
-            self.set_dev()
-
-        servo_settings = self.model.state.toolbar.servo
-        device = servo_settings.device.get()
-        ao_channel = servo_settings.ao_channel.get()
-
-        print(f"The device is {device}, and the aochannel is {ao_channel}")
-
-    def on_option_changed(self, *args):
-        servo_settings = self.model.state.toolbar.servo
-        device = servo_settings.device.get()
-        ao_channel = servo_settings.ao_channel.get()
-        if device != "" and ao_channel != "":
-            
-            if self.set_dev():
-                self.view.toolbar.pressure_control_settings.enable_buttons()
-
-    def update_intvl(self):
+    def update_intvl(self) -> None:
         current_time = time.time()
 
-        # Check if sufficient time has elapsed since the last update
-        if self.last_update_time is not None and (current_time - self.last_update_time) < self.update_threshold:
-            return  # Exit if not enough time has passed
+        if (
+            self.last_update_time is not None
+            and (current_time - self.last_update_time) < self.update_threshold
+        ):
+            return
 
         pressure_protocol_settings = self.model.state.toolbar.pressure_protocol
         if pressure_protocol_settings.pressure_protocol_flag.get() == 0:
             if self.protocol_completed:
-                self.reset_protocol()  # Reset protocol for next run
-            return  # Exit if the protocol is not active
+                self.reset_protocol()
+            return
 
         if self.pressure_start_time is None:
             self.initialize_pressure_protocol(pressure_protocol_settings)
 
         elapsed_seconds = current_time - self.pressure_start_time
 
-        time_to_update_secs = self.multiplier * self.pressure_time_interval - int(elapsed_seconds)
-        self.model.state.toolbar.data_acq.countdown.set(str(timedelta(seconds=time_to_update_secs)))
+        time_to_update_secs = (
+            self.multiplier * self.pressure_time_interval - int(elapsed_seconds)
+        )
+        if self._hold_step_active:
+            self.model.state.toolbar.data_acq.countdown.set("Hold")
+        else:
+            self.model.state.toolbar.data_acq.countdown.set(
+                str(timedelta(seconds=max(time_to_update_secs, 0)))
+            )
 
         if elapsed_seconds >= self.next_pressure_update_time:
+            if self._hold_step_pending or self._hold_step_active:
+                self._hold_step_active = True
+                self._hold_step_pending = False
+                self._set_var_safe(self.model.state.toolbar.pressure_protocol.hold_step, True)
+                return
             self.update_pressure()
-            self.next_pressure_update_time += self.pressure_time_interval# * self.multiplier
+            self.next_pressure_update_time += self.pressure_time_interval
 
         self.last_update_time = current_time
 
-    def initialize_pressure_protocol(self, settings):
-        self.start_pressure = settings.pressure_start.get()
-        self.stop_pressure = settings.pressure_stop.get()
-        self.pressure_interval = settings.pressure_intvl.get()
-        self.pressure_time_interval = settings.time_intvl.get()
+    def initialize_pressure_protocol(self, settings) -> None:
+        self.start_pressure = self._var_to_float(settings.pressure_start, 0.0)
+        self.stop_pressure = self._var_to_float(settings.pressure_stop, self.start_pressure)
+        interval_value = self._var_to_float(settings.pressure_intvl, 0.0)
+        self.pressure_interval = abs(interval_value)
+        self.pressure_time_interval = self._var_to_float(settings.time_intvl, 0.0)
         self.pressure_start_time = time.time()
         self.next_pressure_update_time = self.pressure_time_interval
         self.multiplier = 1
         self.protocol_completed = False
+        self._hold_step_pending = False
+        self._hold_step_active = False
+        self._set_var_safe(self.model.state.toolbar.pressure_protocol.hold_step, False)
+        if self.stop_pressure > self.start_pressure:
+            self._direction = 1
+        elif self.stop_pressure < self.start_pressure:
+            self._direction = -1
+        else:
+            self._direction = 0
 
-        # Immediately set pressure to start_pressure when the protocol begins
         self.set_pressure = self.start_pressure
         self.adjust_pressure(self.set_pressure)
 
-
-    def update_pressure(self):
+    def update_pressure(self) -> None:
         self.stop_protocol_on_completion = True
         self.completed = False
-        if self.set_pressure < self.stop_pressure:
-            self.set_pressure += self.pressure_interval
-            self.adjust_pressure(self.set_pressure)
-            self.multiplier += 1
-        else:
-            
 
-            if not self.model.state.toolbar.pressure_protocol.hold_pressure.get():# Reset to start pressure or stop protocol
-                self.set_pressure = self.start_pressure
-                self.adjust_pressure(self.set_pressure)
-            self.multiplier = 1  # Reset the multiplier
+        interval = self.pressure_interval or 0.0
+        if self._direction == 0 or interval <= 0:
             self.completed = True
-            self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.set(0)
-            self.reset_protocol()  # Reset protocol for next run
+        else:
+            step = interval * self._direction
+            next_pressure = self.set_pressure + step
+            if self._direction > 0:
+                if next_pressure >= self.stop_pressure:
+                    if self.set_pressure != self.stop_pressure:
+                        self.set_pressure = self.stop_pressure
+                        self.adjust_pressure(self.set_pressure)
+                    self.completed = True
+                else:
+                    self.set_pressure = next_pressure
+                    self.adjust_pressure(self.set_pressure)
+                    self.multiplier += 1
+            else:
+                if next_pressure <= self.stop_pressure:
+                    if self.set_pressure != self.stop_pressure:
+                        self.set_pressure = self.stop_pressure
+                        self.adjust_pressure(self.set_pressure)
+                    self.completed = True
+                else:
+                    self.set_pressure = next_pressure
+                    self.adjust_pressure(self.set_pressure)
+                    self.multiplier += 1
 
         if self.completed:
+            self.protocol_completed = True
+            if not self.model.state.toolbar.pressure_protocol.hold_pressure.get():
+                self.set_pressure = self.start_pressure
+                self.adjust_pressure(self.set_pressure)
+            self.multiplier = 1
+            self._set_var_safe(self.model.state.toolbar.pressure_protocol.pressure_protocol_flag, 0)
+            self.reset_protocol()
+
             self.end_protocol()
 
-
-
-    def reset_protocol(self):
-        # Reset all protocol control variables
+    def reset_protocol(self) -> None:
         settings = self.model.state.toolbar.pressure_protocol
-        self.start_pressure = settings.pressure_start.get()
-        self.stop_pressure = settings.pressure_stop.get()
-        self.pressure_interval = settings.pressure_intvl.get()
-        self.pressure_time_interval = settings.time_intvl.get()
-        self.set_pressure = settings.set_pressure.get()
+        self.start_pressure = self._var_to_float(settings.pressure_start, 0.0)
+        self.stop_pressure = self._var_to_float(settings.pressure_stop, self.start_pressure)
+        interval_value = self._var_to_float(settings.pressure_intvl, 0.0)
+        self.pressure_interval = abs(interval_value)
+        self.pressure_time_interval = self._var_to_float(settings.time_intvl, 0.0)
+        self.set_pressure = self._var_to_float(settings.set_pressure, self.start_pressure)
         self.pressure_start_time = None
         self.multiplier = 1
         self.next_pressure_update_time = 0
         self.protocol_completed = False
+        self._hold_step_pending = False
+        self._hold_step_active = False
+        self._set_var_safe(self.model.state.toolbar.pressure_protocol.hold_step, False)
+        if self.stop_pressure > self.start_pressure:
+            self._direction = 1
+        elif self.stop_pressure < self.start_pressure:
+            self._direction = -1
+        else:
+            self._direction = 0
 
-
-
-    def set_dev(self):
-
-        time.sleep(2)
-        servo_settings = self.model.state.toolbar.servo
-        device = servo_settings.device.get()
-        ao_channel = servo_settings.ao_channel.get()
-
-
-
-        # Clear any existing task to avoid conflicts
-        if self.task is not None:
-            self.task.ClearTask()
-
-        try:
-            self.task = PyDAQmx.Task()
-            self.task.CreateAOVoltageChan(f"/{device}/{ao_channel}", "", -10.0, 10.0, PyDAQmx.DAQmx_Val_Volts, None)
-            self.task.StartTask()
-            # Assuming 'set_pressure_entry' is part of the view
-            self.view.toolbar.pressure_protocol_settings.set_unlock_state()  # Enable the entry
-            self.view.toolbar.pressure_protocol_settings.set_unlock_state() 
-            return True  # Device successfully set
-        except Exception as e:
-            print("Failed to connect to NI device:", e)
-            self.view.toolbar.pressure_protocol_settings.set_lock_state()  # Disable the entry
-            self.view.toolbar.pressure_protocol_settings.set_lock_state() 
-            # Temporarily remove the trace callback if necessary
-            try:
-                servo_settings.device.trace_remove(...)
-            except:
-                pass
-            try:
-                servo_settings.ao_channel.trace_remove(...)
-            except:
-                pass
-            tmb.showinfo("Warning", "Cannot connect to NI device:\n - Ensure the device is connected via USB.\n - Check the device name in the NI Device Monitor Software.")
-
-            servo_settings.device.set("")
-            servo_settings.ao_channel.set("")
-            servo_settings.device.trace_add("write", ...)
-            servo_settings.ao_channel.trace_add("write", ...)
-            return False  # Failed to set the device
-            
-        
-
-    def adjust_pressure(self, pressure_value, update_table=True):
-        if not self.pydaqmx_available:
+    def hold_current_step(self) -> None:
+        """Pause at the end of the current interval and hold the present pressure."""
+        if self.pressure_time_interval is None:
             return
+        if self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.get() != 1:
+            return
+        self._hold_step_pending = True
+        self._set_var_safe(self.model.state.toolbar.pressure_protocol.hold_step, True)
 
-        # Validate and adjust pressure value to be within the acceptable range
-        pressure_value = max(min(200, pressure_value), 0)
-
-        pressure_protocol_settings = self.model.state.toolbar.pressure_protocol
-        pressure_protocol_settings.set_pressure.set(pressure_value)
-
-        # Update the pressure using PyDAQmx
-        try:
-            # This line writes the analog value to the DAQ device to set the pressure
-            # The pressure_value is divided by 100, assuming it's being scaled to the DAQ device's range
-            self.task.WriteAnalogScalarF64(1, 10.0, pressure_value / 100, None)
-        except Exception as e:
-            # Handle exceptions, possibly log or show an error message
-            print("Exception occurred while setting pressure:", e)
-
-        # Optionally update the table
-        # If update_table is True, this will update the UI to reflect the new pressure
-        if update_table:
-            # Assuming this method updates a UI element to show the current pressure
-            self.model.state.table.label.set(f"Set pressure = {pressure_value} mmHg")
-            self.model.add_table_row()
+    def advance_to_next_step(self) -> None:
+        """Resume from a held step and move immediately to the next pressure target."""
+        if self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.get() != 1:
+            return
+        if self.pressure_start_time is None:
+            return
+        self._hold_step_pending = False
+        self._hold_step_active = False
+        self._set_var_safe(self.model.state.toolbar.pressure_protocol.hold_step, False)
+        self.update_pressure()
+        if not self.protocol_completed:
+            elapsed = time.time() - self.pressure_start_time
+            self.next_pressure_update_time = elapsed + self.pressure_time_interval

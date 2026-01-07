@@ -37,6 +37,23 @@ The VasoTracker 2.0 software is a comprehensive software solution designed for t
 
 VasoTracker can be installed using either the standalone executable file for straightforward setup or from the source code for more advanced customization options. Below are the steps for both methods.
 
+### Pressure Control Utilities
+
+The repository includes a sketch-agnostic Arduino client (`vasomoto_client.py`) and an optional REST bridge (`vasomoto_service.py`) for labs using VasoMoto hardware.
+
+- Install dependencies in your Python environment:
+  - `pip install pyserial`
+  - `pip install flask` (only needed for the REST bridge)
+- Run the standalone hardware smoke test:
+  - `python scripts/vasomoto_serial_test.py`
+  - Add `--port <SERIAL_PORT>` if auto-detection is insufficient and `--set 60` to send an initial command.
+- Run the serial client directly:
+  - `python vasomoto_client.py --port <SERIAL_PORT> --baud 115200 --set 60`
+  - Leave `--port`/`--baud` unset to auto-detect common options and watch live telemetry in the console.
+- Start the REST bridge if you prefer HTTP control:
+  - `python vasomoto_service.py`
+  - Set pressure with `curl "http://127.0.0.1:8414/set_pressure?mmHg=60"` and stream telemetry from `http://127.0.0.1:8414/stream`.
+
 ### Option 1: Installing and Running from the Executable File
 
 ***This method is recommended for most users.***
