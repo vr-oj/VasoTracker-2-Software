@@ -101,7 +101,7 @@ from matplotlib.path import Path as MplPath
 import skimage
 import tifffile as tf
 import tkinter as tk
-from tkinter import filedialog, scrolledtext, IntVar, StringVar, DoubleVar, BooleanVar, Scale, TclError
+from tkinter import filedialog, scrolledtext, simpledialog, IntVar, StringVar, DoubleVar, BooleanVar, Scale, TclError
 import tkinter.messagebox as tmb
 import tkinter.ttk as ttk
 from tkinter import font
@@ -2909,6 +2909,19 @@ class Model:
         if table.rows:
             table.rows[:] = [row for row in table.rows if str(row[0]) not in row_id_set]
         self._rewrite_table_file()
+
+    def rename_table_row_label(self, row_id: str, new_label: str) -> None:
+        if row_id is None:
+            return
+        row_id = str(row_id)
+        table = self.state.table
+        updated = False
+        for row in table.rows:
+            if str(row[0]) == row_id:
+                row[3] = new_label
+                updated = True
+        if updated:
+            self._rewrite_table_file()
 
 def make_entry_factory(self):
     def make_entry(EntryType: Type[tk.Widget], row, column=1, sticky="",padx=0, pady=2, disabled=False, **kwargs):
@@ -5755,6 +5768,8 @@ class TableFrame(ttk.Frame):
         self.width = self.winfo_width()
         self.height = self.winfo_height()
 
+        self.delete_row_callback = None
+        self.rename_row_callback = None
         self.setup_widgets()
 
         self.state_vars.table.dirty.trace_add(
@@ -5768,7 +5783,7 @@ class TableFrame(ttk.Frame):
     def setup_widgets(self):
         sv = self.state_vars.table
 
-        padx = 8
+        padx = 6
 
         # Create a style instance
         style = ttk.Style()
@@ -5780,30 +5795,23 @@ class TableFrame(ttk.Frame):
         table_controls.grid(
             row=0, column=0, columnspan=5, sticky=tk.N + tk.S + tk.E + tk.W
         )
+        table_controls.grid_columnconfigure(0, weight=1)
         #ctk.CTkLabel(table_controls, text="Label:").grid(row=0, column=0)
         self.label_entry = ctk.CTkEntry(
             table_controls,
-            width=200,
+            width=180,
             textvariable=sv.label,
             font=(default_font, default_font_size),
             fg_color="white",
             text_color=entry_text_color,
             placeholder_text_color=entry_placeholder_color,
         )
-        self.label_entry.grid(row=0, column=0, columnspan=2, sticky="ew")
-        self.add_button = ctk.CTkButton(table_controls, text="Add", font=(default_font, default_font_size), width=80, text_color="black")
-        self.add_button.grid(row=0, column=2, padx=padx)
-        self.delete_button = ctk.CTkButton(
-            table_controls,
-            text="Delete",
-            font=(default_font, default_font_size),
-            width=80,
-            text_color="black",
-        )
-        self.delete_button.grid(row=0, column=3, padx=padx)
+        self.label_entry.grid(row=0, column=0, padx=(0, padx), sticky="ew")
+        self.add_button = ctk.CTkButton(table_controls, text="Add", font=(default_font, default_font_size), width=70, text_color="black")
+        self.add_button.grid(row=0, column=1, padx=(0, padx))
 
         ctk.CTkLabel(table_controls, text="Ref Diameter:", font=(default_font, default_font_size)).grid(
-            row=1, column=0, padx=(0, 0), pady=(6, 0), sticky="w"
+            row=0, column=2, padx=(0, 4)
         )
         self.ref_diam_entry = ctk.CTkEntry(
             table_controls,
@@ -5814,14 +5822,21 @@ class TableFrame(ttk.Frame):
             text_color=entry_text_color,
             placeholder_text_color=entry_placeholder_color,
         )
-        self.ref_diam_entry.grid(row=1, column=1, pady=(6, 0), sticky="w")
+        self.ref_diam_entry.grid(row=0, column=3, padx=(0, padx))
         self.ref_diam_entry.configure(state=tk.DISABLED)
 
-        self.ref_button = ctk.CTkButton(table_controls, text="Set ref", font=(default_font, default_font_size), width=80, text_color="black")
-        self.ref_button.grid(row=1, column=2, padx=padx, pady=(6, 0))
+        self.ref_button = ctk.CTkButton(table_controls, text="Set ref", font=(default_font, default_font_size), width=70, text_color="black")
+        self.ref_button.grid(row=0, column=4)
         
         self.table = ttk.Treeview(self, show="headings")
         self.table["columns"] = sv.headers()
+        self.context_menu = tk.Menu(self, tearoff=0)
+        self.context_menu.add_command(label="Rename", command=self._on_rename_menu)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="Delete", command=self._on_delete_menu)
+        self.table.bind("<Button-3>", self._show_table_context_menu)
+        self.table.bind("<Button-2>", self._show_table_context_menu)
+        self.table.bind("<Control-Button-1>", self._show_table_context_menu)
 
         self.table.column("#0", width=25)
         self.table.column("#", width=25)
@@ -5860,10 +5875,50 @@ class TableFrame(ttk.Frame):
         v_scrollbar.configure(command=self.table.yview)
         self.table.grid(row=1, column=0, sticky=tk.N + tk.S + tk.E + tk.W)
         self.table.configure(yscrollcommand=v_scrollbar.set)
-        self.grid_rowconfigure(0, weight=1, minsize=60)
+        self.grid_rowconfigure(0, weight=1, minsize=30)
         self.grid_rowconfigure(1, weight=9)
         self.grid_columnconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)  # Make the table column expandable
+
+    def set_delete_row_callback(self, callback: Callable[[], None]) -> None:
+        self.delete_row_callback = callback
+
+    def set_rename_row_callback(self, callback: Callable[[str, str, str], None]) -> None:
+        self.rename_row_callback = callback
+
+    def _show_table_context_menu(self, event):
+        row_id = self.table.identify_row(event.y)
+        if row_id:
+            self.table.selection_set(row_id)
+        try:
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.context_menu.grab_release()
+        return "break"
+
+    def _on_delete_menu(self):
+        if self.delete_row_callback is not None:
+            self.delete_row_callback()
+
+    def _on_rename_menu(self):
+        selection = self.table.selection()
+        if not selection:
+            return
+        item_id = selection[0]
+        values = self.table.item(item_id, "values")
+        if not values:
+            return
+        old_label = values[3] if len(values) > 3 else ""
+        new_label = simpledialog.askstring(
+            "Rename",
+            "New label:",
+            initialvalue=old_label,
+            parent=self.winfo_toplevel(),
+        )
+        if new_label is None:
+            return
+        if self.rename_row_callback is not None:
+            self.rename_row_callback(item_id, str(values[0]), new_label)
 
     def add_row(self, row: List[str]):
         self.table.insert(
@@ -6585,7 +6640,8 @@ class Controller:
         #tb.start_stop.record_button.configure(command=self.record_data)
         tb.start_stop.snapshot_button.configure(command=self.take_snapshot)
         self.view.table.add_button.configure(command=self.add_table_row)
-        self.view.table.delete_button.configure(command=self.delete_table_row)
+        self.view.table.set_delete_row_callback(self.delete_table_row)
+        self.view.table.set_rename_row_callback(self.rename_table_row)
         self.view.table.ref_button.configure(command=self.set_ref_diameter)
         self.view.table.table.bind("<Delete>", self.delete_table_row)
         self.view.table.table.bind("<BackSpace>", self.delete_table_row)
@@ -6956,6 +7012,17 @@ class Controller:
         self.model.delete_table_rows(row_ids)
         if event is not None:
             return "break"
+
+    def rename_table_row(self, item_id: str, row_id: str, new_label: str) -> None:
+        table_widget = self.view.table.table
+        if not item_id:
+            return
+        values = list(table_widget.item(item_id, "values"))
+        if not values or len(values) < 4:
+            return
+        values[3] = new_label
+        table_widget.item(item_id, values=values)
+        self.model.rename_table_row_label(row_id, new_label)
 
     def update_set_pressure(self):
         new_pressure_value = safe_var_float(
