@@ -81,7 +81,7 @@ import sys
 import threading
 import time
 import traceback
-from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple, Type
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Set, Tuple, Type
 import webbrowser
 # Suppress pygame welcome message
 sys.stdout = open(os.devnull, 'w')
@@ -573,6 +573,8 @@ class TableState:
     dirty: BooleanVar = field(default_factory=BooleanVar)
     dirty_marker: BooleanVar = field(default_factory=BooleanVar)
     clear: BooleanVar = field(default_factory=BooleanVar)
+    pending_marker_row_ids: Deque[str] = field(default_factory=deque)
+    marker_map: Dict[str, int] = field(default_factory=dict)
 
     def headers(self) -> Tuple[str]:
         return (
@@ -1118,6 +1120,7 @@ class Model:
         self._stretch_frozen_delta_value: Optional[str] = None
         self._stretch_frozen_status: Optional[str] = None
         self._stretch_use_setpoint_autoset = True
+        self._pending_trace_marker_updates: Set[int] = set()
 
 
         try:
@@ -1536,6 +1539,8 @@ class Model:
                 self.table_file.close()
                 self.table_file = None
                 self.table_writer = None
+            if close_trace:
+                self._apply_pending_trace_marker_updates()
         except Exception as exc:
             print("Close outputs error:", exc)
 
@@ -1855,11 +1860,15 @@ class Model:
                 self.state.cam_show.dirty.set(True)
 
         if diams is not None:
-
+            table = self.state.table
             marker = 0
-            if self.state.table.dirty_marker.get():
+            pending_marker_row_id = None
+            if table.pending_marker_row_ids:
                 marker = 1
-                self.state.table.dirty_marker.set(False)
+                pending_marker_row_id = table.pending_marker_row_ids.popleft()
+            elif table.dirty_marker.get():
+                marker = 1
+            table.dirty_marker.set(bool(table.pending_marker_row_ids))
 
 
             latest_p1, latest_p2, latest_sp = (None, None, None)
@@ -1902,6 +1911,8 @@ class Model:
                 ods_valid=~diams.od_outliers,
                 ids_valid=~diams.id_outliers,
             )
+            if marker == 1 and pending_marker_row_id is not None:
+                table.marker_map[pending_marker_row_id] = len(self.state.measure.markers) - 1
 
             tracking = self.state.app.tracking.get()
             if (
@@ -2898,17 +2909,150 @@ class Model:
         ]
         table.rows_to_add.append(disp_values)
         table.dirty.set(True)
+        table.pending_marker_row_ids.append(str(self.current_table_row))
         table.dirty_marker.set(True)
         self.current_table_row += 1
 
-    def delete_table_rows(self, row_ids: Iterable[str]) -> None:
+    def delete_table_rows(
+        self, row_ids: Iterable[str], frame_numbers: Optional[Iterable[int]] = None
+    ) -> None:
         row_id_set = {str(row_id) for row_id in row_ids if row_id is not None}
         if not row_id_set:
             return
         table = self.state.table
+        measure = self.state.measure
+        for row_id in row_id_set:
+            marker_idx = table.marker_map.pop(row_id, None)
+            if marker_idx is not None and 0 <= marker_idx < len(measure.markers):
+                measure.markers[marker_idx] = 0
         if table.rows:
             table.rows[:] = [row for row in table.rows if str(row[0]) not in row_id_set]
+        self._renumber_table_rows()
         self._rewrite_table_file()
+        self._queue_trace_marker_updates(frame_numbers)
+
+    def _renumber_table_rows(self) -> None:
+        table = self.state.table
+        new_marker_map: Dict[str, int] = {}
+        old_to_new: Dict[str, str] = {}
+        for idx, row in enumerate(table.rows, start=1):
+            old_id = str(row[0])
+            new_id = str(idx)
+            row[0] = idx
+            old_to_new[old_id] = new_id
+            marker_idx = table.marker_map.get(old_id)
+            if marker_idx is not None:
+                new_marker_map[new_id] = marker_idx
+        table.marker_map = new_marker_map
+        if table.pending_marker_row_ids:
+            new_pending: Deque[str] = deque()
+            for row_id in table.pending_marker_row_ids:
+                new_id = old_to_new.get(str(row_id))
+                if new_id is not None:
+                    new_pending.append(new_id)
+            table.pending_marker_row_ids = new_pending
+        if table.rows_to_add:
+            for row in table.rows_to_add:
+                if not row:
+                    continue
+                old_id = str(row[0])
+                new_id = old_to_new.get(old_id)
+                if new_id is not None:
+                    row[0] = new_id
+        table.dirty_marker.set(bool(table.pending_marker_row_ids))
+        self.current_table_row = len(table.rows) + 1
+
+    def _queue_trace_marker_updates(self, frame_numbers: Optional[Iterable[int]]) -> None:
+        if not frame_numbers:
+            return
+        frame_set = set()
+        for frame in frame_numbers:
+            try:
+                frame_set.add(int(frame))
+            except Exception:
+                continue
+        if not frame_set:
+            return
+        self._pending_trace_marker_updates.update(frame_set)
+        if not self.state.app.tracking.get():
+            self._apply_pending_trace_marker_updates()
+
+    def _apply_pending_trace_marker_updates(self) -> None:
+        if not self._pending_trace_marker_updates:
+            return
+        frame_set = set(self._pending_trace_marker_updates)
+        self._pending_trace_marker_updates.clear()
+        output_was_open = getattr(self, "output_file", None) is not None
+        if output_was_open:
+            try:
+                self.output_file.flush()
+                self.output_file.close()
+            except Exception:
+                pass
+            self.output_file = None
+            self.output_writer = None
+        self._update_trace_marker_file(self.output_path, frame_set)
+        if (
+            getattr(self, "recorded_csv_path", None)
+            and self.recorded_csv_file is None
+        ):
+            self._update_trace_marker_file(self.recorded_csv_path, frame_set)
+        if output_was_open and self.output_path and self.trace_fieldnames:
+            try:
+                self.output_file = open(self.output_path, "a", newline="")
+                self.output_writer = csv.DictWriter(
+                    self.output_file, fieldnames=self.trace_fieldnames
+                )
+            except Exception as exc:
+                print("Failed to reopen trace file:", exc)
+
+    def _update_trace_marker_file(self, path: Optional[str], frame_set: Set[int]) -> None:
+        if not path or not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", newline="") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = reader.fieldnames
+                if not fieldnames:
+                    return
+                rows = list(reader)
+            if "FrameNumber" not in fieldnames or "Table Marker" not in fieldnames:
+                return
+            updated = False
+            for row in rows:
+                try:
+                    frame_val = int(float(row.get("FrameNumber", "")))
+                except Exception:
+                    continue
+                if frame_val in frame_set:
+                    if str(row.get("Table Marker", "")) != "0":
+                        row["Table Marker"] = "0"
+                        updated = True
+            if not updated:
+                return
+            with open(path, "w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+        except Exception as exc:
+            print("Failed to update trace markers:", exc)
+
+    def refresh_graph_markers(self) -> None:
+        measure = self.state.measure
+        graph = self.state.graph
+        if len(measure.times) == 0:
+            graph.markers.x = np.zeros(0)
+            graph.markers.y = np.zeros(0)
+        else:
+            max_pts = min(self.configure.memory.num_plot_points, len(measure.times))
+            new_x = np.asarray(measure.times[-max_pts:]) - measure.times[-1]
+            graph.markers.x = new_x
+            graph.markers.y = np.asarray(measure.markers[-max_pts:])
+        graph.dirty.set(True)
+
+    def apply_pending_trace_marker_updates(self) -> None:
+        if not self.state.app.tracking.get():
+            self._apply_pending_trace_marker_updates()
 
     def rename_table_row_label(self, row_id: str, new_label: str) -> None:
         if row_id is None:
@@ -5770,6 +5914,9 @@ class TableFrame(ttk.Frame):
 
         self.delete_row_callback = None
         self.rename_row_callback = None
+        self._inline_editor = None
+        self._inline_item_id = None
+        self._inline_column = None
         self.setup_widgets()
 
         self.state_vars.table.dirty.trace_add(
@@ -5837,6 +5984,7 @@ class TableFrame(ttk.Frame):
         self.table.bind("<Button-3>", self._show_table_context_menu)
         self.table.bind("<Button-2>", self._show_table_context_menu)
         self.table.bind("<Control-Button-1>", self._show_table_context_menu)
+        self.table.bind("<Double-1>", self._on_table_double_click)
 
         self.table.column("#0", width=25)
         self.table.column("#", width=25)
@@ -5919,6 +6067,58 @@ class TableFrame(ttk.Frame):
             return
         if self.rename_row_callback is not None:
             self.rename_row_callback(item_id, str(values[0]), new_label)
+
+    def _on_table_double_click(self, event):
+        row_id = self.table.identify_row(event.y)
+        col_id = self.table.identify_column(event.x)
+        if not row_id or col_id != "#4":
+            return
+        self._begin_inline_edit(row_id, col_id)
+
+    def _begin_inline_edit(self, item_id: str, column: str) -> None:
+        if self._inline_editor is not None:
+            self._commit_inline_edit()
+        bbox = self.table.bbox(item_id, column)
+        if not bbox:
+            return
+        x, y, width, height = bbox
+        values = self.table.item(item_id, "values")
+        old_text = values[3] if len(values) > 3 else ""
+        entry = tk.Entry(self.table, font=(default_font, default_font_size))
+        entry.insert(0, old_text)
+        entry.select_range(0, tk.END)
+        entry.place(x=x, y=y, width=width, height=height)
+        entry.focus_set()
+        entry.bind("<Return>", lambda *_: self._commit_inline_edit())
+        entry.bind("<Escape>", lambda *_: self._cancel_inline_edit())
+        entry.bind("<FocusOut>", lambda *_: self._commit_inline_edit())
+        self._inline_editor = entry
+        self._inline_item_id = item_id
+        self._inline_column = column
+
+    def _commit_inline_edit(self) -> None:
+        if self._inline_editor is None or self._inline_item_id is None:
+            return
+        new_text = self._inline_editor.get()
+        item_id = self._inline_item_id
+        values = list(self.table.item(item_id, "values"))
+        if len(values) > 3:
+            values[3] = new_text
+            self.table.item(item_id, values=values)
+            if self.rename_row_callback is not None:
+                self.rename_row_callback(item_id, str(values[0]), new_text)
+        self._inline_editor.destroy()
+        self._inline_editor = None
+        self._inline_item_id = None
+        self._inline_column = None
+
+    def _cancel_inline_edit(self) -> None:
+        if self._inline_editor is None:
+            return
+        self._inline_editor.destroy()
+        self._inline_editor = None
+        self._inline_item_id = None
+        self._inline_column = None
 
     def add_row(self, row: List[str]):
         self.table.insert(
@@ -6948,6 +7148,7 @@ class Controller:
                 self.model.state.app.tracking.set(False)
                 self.model.state.app.acquiring.set(False)
                 self.model.state.app.file_analysed.set(0)
+                self.model.apply_pending_trace_marker_updates()
             else:
                 #Rerun the analysis in the While acq code.
                 self.model.state.app.tracking.set(True)
@@ -6974,6 +7175,8 @@ class Controller:
                     self.model.start_time = current_time
                 current_state = self.model.state.app.tracking.get()
                 self.model.state.app.tracking.set(not current_state)
+                if current_state:
+                    self.model.apply_pending_trace_marker_updates()
 
     def start_tracking_file(self):
         self.model.state.app.tracking_file.set(True)
@@ -7003,13 +7206,22 @@ class Controller:
         if not selection:
             return "break" if event is not None else None
         row_ids = []
+        frame_numbers = []
         for item_id in selection:
             values = table_widget.item(item_id, "values")
             if values:
                 row_ids.append(str(values[0]))
+                if len(values) > 2:
+                    frame_numbers.append(values[2])
         for item_id in selection:
             table_widget.delete(item_id)
-        self.model.delete_table_rows(row_ids)
+        self.model.delete_table_rows(row_ids, frame_numbers)
+        for idx, item_id in enumerate(table_widget.get_children(), start=1):
+            values = list(table_widget.item(item_id, "values"))
+            if values:
+                values[0] = str(idx)
+                table_widget.item(item_id, values=values)
+        self.model.refresh_graph_markers()
         if event is not None:
             return "break"
 
