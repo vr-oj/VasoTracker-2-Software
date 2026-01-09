@@ -484,6 +484,7 @@ class DataAcqPaneState:
     caliper_length: DoubleVar = field(default_factory=DoubleVar)
     countdown: StringVar = field(default_factory=lambda: StringVar(value="0:00:00"))
     device_set_pressure: StringVar = field(default_factory=lambda: StringVar(value="0.0"))
+    device_set_pressure_half: StringVar = field(default_factory=lambda: StringVar(value="N/A"))
 
 
 @dataclass
@@ -496,6 +497,7 @@ class StretchHelperState:
     setpoint_display: StringVar = field(default_factory=lambda: StringVar(value="N/A"))
     measured_display: StringVar = field(default_factory=lambda: StringVar(value="N/A"))
     delta_display: StringVar = field(default_factory=lambda: StringVar(value="%ΔID at 60: N/A"))
+    delta_value_display: StringVar = field(default_factory=lambda: StringVar(value="N/A"))
     status: StringVar = field(default_factory=lambda: StringVar(value="Not started"))
 
 
@@ -1113,6 +1115,7 @@ class Model:
         self._stretch_last_id: Optional[float] = None
         self._stretch_last_delta: Optional[float] = None
         self._stretch_frozen_delta_display: Optional[str] = None
+        self._stretch_frozen_delta_value: Optional[str] = None
         self._stretch_frozen_status: Optional[str] = None
         self._stretch_use_setpoint_autoset = True
 
@@ -1255,6 +1258,7 @@ class Model:
         self._stretch_last_id = None
         self._stretch_last_delta = None
         self._stretch_frozen_delta_display = None
+        self._stretch_frozen_delta_value = None
         self._stretch_frozen_status = None
         self._stretch_use_setpoint_autoset = True
         stretch = self.state.toolbar.stretch_helper
@@ -1264,6 +1268,7 @@ class Model:
         safe_var_set(stretch.baseline_ready, False)
         safe_var_set(stretch.baseline_set, False)
         safe_var_set(stretch.delta_display, "%ΔID at 60: N/A")
+        safe_var_set(stretch.delta_value_display, "N/A")
         safe_var_set(stretch.status, "Not started")
         safe_var_set(stretch.setpoint_display, "N/A")
         safe_var_set(stretch.measured_display, "N/A")
@@ -1275,6 +1280,7 @@ class Model:
         self._stretch_last_id = None
         self._stretch_last_delta = None
         self._stretch_frozen_delta_display = None
+        self._stretch_frozen_delta_value = None
         self._stretch_frozen_status = None
         self._stretch_use_setpoint_autoset = True
         safe_var_set(stretch.setup_active, True)
@@ -1282,6 +1288,7 @@ class Model:
         safe_var_set(stretch.baseline_set, False)
         safe_var_set(stretch.baseline_ready, False)
         safe_var_set(stretch.delta_display, "%ΔID at 60: N/A")
+        safe_var_set(stretch.delta_value_display, "N/A")
         safe_var_set(stretch.status, "Ready: set 60 mmHg and capture baseline")
 
     def capture_stretch_baseline(self) -> None:
@@ -1307,6 +1314,7 @@ class Model:
         self._stretch_last_delta = 0.0
         safe_var_set(stretch.baseline_set, True)
         safe_var_set(stretch.delta_display, "%ΔID at 60: 0.0%")
+        safe_var_set(stretch.delta_value_display, "0.0%")
         safe_var_set(stretch.status, "Baseline captured; start stretch")
 
     def finish_stretch_setup(self) -> None:
@@ -1317,6 +1325,7 @@ class Model:
         except Exception:
             return
         self._stretch_frozen_delta_display = stretch.delta_display.get()
+        self._stretch_frozen_delta_value = stretch.delta_value_display.get()
         self._stretch_frozen_status = stretch.status.get()
         safe_var_set(stretch.setup_active, False)
         safe_var_set(stretch.setup_complete, True)
@@ -2262,6 +2271,8 @@ class Model:
             safe_var_set(stretch.baseline_ready, False)
             if self._stretch_frozen_delta_display is not None:
                 safe_var_set(stretch.delta_display, self._stretch_frozen_delta_display)
+            if self._stretch_frozen_delta_value is not None:
+                safe_var_set(stretch.delta_value_display, self._stretch_frozen_delta_value)
             if self._stretch_frozen_status is not None:
                 safe_var_set(stretch.status, self._stretch_frozen_status)
             return
@@ -2270,6 +2281,7 @@ class Model:
             safe_var_set(stretch.baseline_ready, False)
             safe_var_set(stretch.baseline_set, False)
             safe_var_set(stretch.delta_display, "%ΔID at 60: N/A")
+            safe_var_set(stretch.delta_value_display, "N/A")
             safe_var_set(stretch.status, "Not started")
             return
 
@@ -2323,6 +2335,7 @@ class Model:
 
         if not baseline_set:
             safe_var_set(stretch.delta_display, "%ΔID at 60: N/A")
+            safe_var_set(stretch.delta_value_display, "N/A")
             if use_setpoint and not setpoint_ok:
                 status = f"Waiting for setpoint = {pref:.0f} mmHg"
             elif measured_available and not measured_ok:
@@ -2342,6 +2355,7 @@ class Model:
             delta = ((current_eval - self._stretch_baseline_id) / self._stretch_baseline_id) * 100.0
             self._stretch_last_delta = delta
             safe_var_set(stretch.delta_display, f"%ΔID at 60: {delta:.1f}%")
+            safe_var_set(stretch.delta_value_display, f"{delta:.1f}%")
             if delta <= (target_pct - tol_pct):
                 status_label = "Beyond"
             elif delta >= (target_pct + tol_pct):
@@ -2353,6 +2367,9 @@ class Model:
             if self._stretch_last_delta is not None:
                 safe_var_set(
                     stretch.delta_display, f"%ΔID at 60: {self._stretch_last_delta:.1f}%"
+                )
+                safe_var_set(
+                    stretch.delta_value_display, f"{self._stretch_last_delta:.1f}%"
                 )
             status = "Hold at 60 mmHg to evaluate"
 
@@ -3695,6 +3712,7 @@ class DataAcquisitionPane(ToolbarPane):
         self._device_set_pressure_trace = protocol_state.device_set_pressure.trace_add(
             "write", lambda *_: sv.device_set_pressure.set(protocol_state.device_set_pressure.get())
         )
+        self._half_pressure_trace = None
         self.bind("<Destroy>", self._on_destroy, add="+")
 
         self.pack(side=tk.LEFT, anchor=tk.N, padx=5, pady=5, fill=tk.Y)
@@ -3754,13 +3772,19 @@ class DataAcquisitionPane(ToolbarPane):
 
         ctk.CTkLabel(
             self,
-            text="Selected pressure (mmHg):",
+            text="Selected pressure / 2 (mmHg):",
             anchor="center",
             font=(default_font, default_font_size),
-        ).grid(row=5, column=0, columnspan=4, padx=(20, 30), pady=(10, 0), sticky=tk.EW)
-        self.device_set_pressure_entry = ctk.CTkEntry(
+        ).grid(row=5, column=0, columnspan=2, padx=(20, 10), pady=(10, 0), sticky=tk.EW)
+        ctk.CTkLabel(
             self,
-            textvariable=sv.device_set_pressure,
+            text="%ΔID at 60:",
+            anchor="center",
+            font=(default_font, default_font_size),
+        ).grid(row=5, column=2, columnspan=2, padx=(10, 30), pady=(10, 0), sticky=tk.EW)
+        self.device_set_pressure_half_entry = ctk.CTkEntry(
+            self,
+            textvariable=sv.device_set_pressure_half,
             font=(default_font, entry_font_size, "bold"),
             justify=justify,
             width=entry_width,
@@ -3768,7 +3792,34 @@ class DataAcquisitionPane(ToolbarPane):
             text_color=color_vt,
             state=tk.DISABLED,
         )
-        self.device_set_pressure_entry.grid(row=6, column=0, columnspan=4, padx=(20, 30), pady=5, sticky=tk.EW)
+        self.device_set_pressure_half_entry.grid(
+            row=6, column=0, columnspan=2, padx=(20, 10), pady=5, sticky=tk.EW
+        )
+        self.stretch_delta_entry = ctk.CTkEntry(
+            self,
+            textvariable=model_vars.toolbar.stretch_helper.delta_value_display,
+            font=(default_font, entry_font_size, "bold"),
+            justify=justify,
+            width=entry_width,
+            fg_color=entry_fg_color,
+            text_color=color_vt,
+            state=tk.DISABLED,
+        )
+        self.stretch_delta_entry.grid(
+            row=6, column=2, columnspan=2, padx=(10, 30), pady=5, sticky=tk.EW
+        )
+
+        def _refresh_half_pressure(*_args) -> None:
+            value = safe_var_float(sv.device_set_pressure, default=float("nan"))
+            if math.isnan(value):
+                safe_var_set(sv.device_set_pressure_half, "N/A")
+            else:
+                safe_var_set(sv.device_set_pressure_half, f"{value / 2.0:.1f}")
+
+        _refresh_half_pressure()
+        self._half_pressure_trace = sv.device_set_pressure.trace_add(
+            "write", _refresh_half_pressure
+        )
 
     def _on_destroy(self, event) -> None:
         if event.widget is not self:
@@ -3783,6 +3834,15 @@ class DataAcquisitionPane(ToolbarPane):
         except tk.TclError:
             pass
         self._device_set_pressure_trace = None
+        half_trace = getattr(self, "_half_pressure_trace", None)
+        if half_trace:
+            try:
+                self.model_vars.toolbar.data_acq.device_set_pressure.trace_remove(
+                    "write", half_trace
+                )
+            except tk.TclError:
+                pass
+        self._half_pressure_trace = None
 
 
 
@@ -6804,7 +6864,11 @@ class Controller:
         except Exception:
             pass
         popup.resizable(False, False)
-        popup.transient(self.view.root)
+        try:
+            popup.lift()
+            popup.focus_force()
+        except Exception:
+            pass
 
         pane = StretchHelperPane(
             popup,
