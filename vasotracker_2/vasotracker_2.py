@@ -4368,6 +4368,7 @@ class PressureControlPane(ToolbarPane):
         self._colour_neutral = "#B0BEC5"
         self._colour_amber = "#f39c12"
         self._colour_green = "#2ecc71"
+        self._colour_red = "#e74c3c"
         sv.device_set_pressure.set("0.0")
         sv.device_set_source.set("init")
         self._device_display_var = tk.StringVar(value="Device set pressure: 0.0 mmHg")
@@ -4377,6 +4378,7 @@ class PressureControlPane(ToolbarPane):
         self._last_device_value: Optional[float] = None
         self._recent_events = deque(maxlen=5)
         self._debug_visible = False
+        self._link_status_job: Optional[str] = None
         sv.hold_step.trace_add("write", lambda *args: self._refresh_hold_button())
 
         # Device status label (kept for backward compatibility but not displayed at top)
@@ -4546,6 +4548,15 @@ class PressureControlPane(ToolbarPane):
         self.pressure_settings_button.pack(fill=tk.X, pady=3)
         self.pressure_settings_button.image = self.pressure_settings_img
 
+        self.link_status_label = ctk.CTkLabel(
+            setup_tab,
+            text="VasoMoto: idle",
+            font=(default_font, default_font_size - 1),
+            text_color=muted_text_color,
+            anchor=tk.W,
+        )
+        self.link_status_label.pack(fill=tk.X, padx=8, pady=(6, 0))
+
         # Debug overlay (hidden by default)
         self.debug_overlay = ctk.CTkLabel(
             self,
@@ -4565,7 +4576,7 @@ class PressureControlPane(ToolbarPane):
         # Create tooltips
         tooltip = ToolTip(self)
         tooltips = {
-            self.pressure_connect_button: "Connect your NI board for pressure control.",
+            self.pressure_connect_button: "Open pressure hardware settings and reconnect.",
             self.start_protocol_button: "Start pressure ramp experiment.",
             self.hold_button: "Pause the protocol at the end of the current interval.",
             self.next_button: "Advance to the next pressure step when on hold.",
@@ -4579,6 +4590,7 @@ class PressureControlPane(ToolbarPane):
 
         self.set_lock_state()
         add_setpoint_listener(self._handle_setpoint_event)
+        self._update_link_status()
         self.bind("<Destroy>", self._on_destroy, add="+")
 
 
@@ -4664,6 +4676,75 @@ class PressureControlPane(ToolbarPane):
             self.hold_button.configure(fg_color=colour)
         except Exception:
             pass
+
+    def _update_link_status(self) -> None:
+        if not getattr(self, "link_status_label", None):
+            return
+        if not self.winfo_exists():
+            return
+
+        controller = getattr(self.model_vars, "pressure_controller", None)
+        text = "Pressure device: unavailable"
+        colour = muted_text_color
+
+        if controller is not None:
+            device_type = controller.active_device_type()
+            if device_type in ("vasomoto", "arduino"):
+                monitor = controller.link_monitor()
+                if monitor is None:
+                    text = "VasoMoto: disconnected"
+                    colour = self._colour_neutral
+                else:
+                    state = getattr(monitor.state, "value", str(monitor.state))
+                    info = monitor.snapshot()
+                    age = info.get("age") if isinstance(info, dict) else None
+                    hz = info.get("rx_hz") if isinstance(info, dict) else None
+
+                    if state == "healthy":
+                        if hz:
+                            text = f"VasoMoto: connected ({hz:.1f} Hz)"
+                        else:
+                            text = "VasoMoto: connected"
+                        colour = self._colour_green
+                    elif state == "connecting":
+                        text = "VasoMoto: connecting..."
+                        colour = self._colour_amber
+                    elif state == "syncing":
+                        text = "VasoMoto: waiting for telemetry..."
+                        colour = self._colour_amber
+                    elif state == "stale":
+                        if age:
+                            text = f"VasoMoto: telemetry paused ({age:.1f}s)"
+                        else:
+                            text = "VasoMoto: telemetry paused"
+                        colour = self._colour_amber
+                    elif state == "error":
+                        text = "VasoMoto: error (reconnecting...)"
+                        colour = self._colour_red
+                    elif state == "closed":
+                        text = "VasoMoto: disconnected"
+                        colour = self._colour_neutral
+                    else:
+                        text = "VasoMoto: idle"
+                        colour = self._colour_neutral
+            elif device_type:
+                text = f"Pressure device: {device_type}"
+                colour = muted_text_color
+            else:
+                text = "Pressure device: none"
+                colour = muted_text_color
+
+        try:
+            self.link_status_label.configure(text=text, text_color=colour)
+        except tk.TclError:
+            return
+
+        if self._link_status_job is not None:
+            try:
+                self.after_cancel(self._link_status_job)
+            except Exception:
+                pass
+        self._link_status_job = self.after(750, self._update_link_status)
 
     def _request_device_refresh(self) -> None:
         if not request_setpoint_refresh():
@@ -4799,6 +4880,12 @@ class PressureControlPane(ToolbarPane):
         if event.widget is not self:
             return
         remove_setpoint_listener(self._handle_setpoint_event)
+        if self._link_status_job is not None:
+            try:
+                self.after_cancel(self._link_status_job)
+            except Exception:
+                pass
+            self._link_status_job = None
         self._listener_removed = True
 
 
@@ -5092,9 +5179,10 @@ class ToolbarView(ctk.CTkFrame):
 
     def set_acquire_state(self):
         for pane in self.panes:
-            # Skip setting the state for PressureProtocolPane
-            if not isinstance(pane, PressureProtocolPane):
-                pane.set_acquire_state()
+            # Keep pressure controls available while acquiring/tracking.
+            if isinstance(pane, (PressureProtocolPane, PressureControlPane)):
+                continue
+            pane.set_acquire_state()
 
 
 class Menus:
@@ -5389,6 +5477,10 @@ class GraphFrame(ttk.Frame):
                 # Only bottom axis visible - expand it to fill the space
                 self.ax2.set_position([0.125, 0.11, 0.775, 0.8])
 
+            # Keep marker axes aligned with their primary axes.
+            self.ax1_markers.set_position(self.ax1.get_position())
+            self.ax2_markers.set_position(self.ax2.get_position())
+
             # Clear existing vertical lines and annotations
             self.clear_markers()
 
@@ -5455,6 +5547,11 @@ class GraphFrame(ttk.Frame):
             self.ax2_markers.add_line(self.id_markers_line)
 
             # Update marker positions based on state.markers.y
+            ax1_ylim = self.ax1.get_ylim()
+            ax2_ylim = self.ax2.get_ylim()
+            self.ax1_markers.set_ylim(*ax1_ylim)
+            self.ax2_markers.set_ylim(*ax2_ylim)
+
             marker_x = []
             od_marker_y = []
             id_marker_y = []
@@ -5464,8 +5561,8 @@ class GraphFrame(ttk.Frame):
             for x, y in zip(state.markers.x, state.markers.y):
                 if y == 1:
                     color = 'green'
-                    marker_line_od = Line2D([x, x], [self.ylim_od[0], self.ylim_od[1]], color=color, marker='o', markersize=5, linewidth=1)
-                    marker_line_id = Line2D([x, x], [self.ylim_id[0], self.ylim_id[1]], color=color, marker='o', markersize=5, linewidth=1)
+                    marker_line_od = Line2D([x, x], [ax1_ylim[0], ax1_ylim[1]], color=color, marker='o', markersize=5, linewidth=1)
+                    marker_line_id = Line2D([x, x], [ax2_ylim[0], ax2_ylim[1]], color=color, marker='o', markersize=5, linewidth=1)
 
                     # Add the lines to the axes
                     self.ax1_markers.add_line(marker_line_od)
@@ -5474,7 +5571,7 @@ class GraphFrame(ttk.Frame):
                     # Add labels
                     self.ax1_markers.annotate(
                         f"{int(count)}",  # Convert x to integer for label
-                        (x, self.ylim_od[1]),
+                        (x, ax1_ylim[1]),
                         xytext=(0, 5),
                         textcoords='offset points',
                         color=color,
@@ -5484,7 +5581,7 @@ class GraphFrame(ttk.Frame):
 
                     self.ax2_markers.annotate(
                         f"{int(count)}",  # Convert x to integer for label
-                        (x, self.ylim_id[1]),
+                        (x, ax2_ylim[1]),
                         xytext=(0, 5),
                         textcoords='offset points',
                         color=color,
@@ -5693,7 +5790,7 @@ class TableFrame(ttk.Frame):
             text_color=entry_text_color,
             placeholder_text_color=entry_placeholder_color,
         )
-        self.label_entry.grid(row=0, column=1)
+        self.label_entry.grid(row=0, column=0, columnspan=2, sticky="ew")
         self.add_button = ctk.CTkButton(table_controls, text="Add", font=(default_font, default_font_size), width=80, text_color="black")
         self.add_button.grid(row=0, column=2, padx=padx)
         self.delete_button = ctk.CTkButton(
@@ -5706,7 +5803,7 @@ class TableFrame(ttk.Frame):
         self.delete_button.grid(row=0, column=3, padx=padx)
 
         ctk.CTkLabel(table_controls, text="Ref Diameter:", font=(default_font, default_font_size)).grid(
-            row=0, column=4, padx=(20, 0)
+            row=1, column=0, padx=(0, 0), pady=(6, 0), sticky="w"
         )
         self.ref_diam_entry = ctk.CTkEntry(
             table_controls,
@@ -5717,11 +5814,11 @@ class TableFrame(ttk.Frame):
             text_color=entry_text_color,
             placeholder_text_color=entry_placeholder_color,
         )
-        self.ref_diam_entry.grid(row=0, column=5)
+        self.ref_diam_entry.grid(row=1, column=1, pady=(6, 0), sticky="w")
         self.ref_diam_entry.configure(state=tk.DISABLED)
 
         self.ref_button = ctk.CTkButton(table_controls, text="Set ref", font=(default_font, default_font_size), width=80, text_color="black")
-        self.ref_button.grid(row=0, column=6, padx=padx)
+        self.ref_button.grid(row=1, column=2, padx=padx, pady=(6, 0))
         
         self.table = ttk.Treeview(self, show="headings")
         self.table["columns"] = sv.headers()
@@ -5763,7 +5860,7 @@ class TableFrame(ttk.Frame):
         v_scrollbar.configure(command=self.table.yview)
         self.table.grid(row=1, column=0, sticky=tk.N + tk.S + tk.E + tk.W)
         self.table.configure(yscrollcommand=v_scrollbar.set)
-        self.grid_rowconfigure(0, weight=1, minsize=30)
+        self.grid_rowconfigure(0, weight=1, minsize=60)
         self.grid_rowconfigure(1, weight=9)
         self.grid_columnconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)  # Make the table column expandable
@@ -6809,19 +6906,18 @@ class Controller:
                 )
             else:
                 if not self.output_path:
-                    tmb.showwarning(
-                        title="Warning",
-                        message="You need to set up an output file (File -> New File).",
-                    )
-                else:
-                    current_state = self.model.state.app.acquiring.get()
+                    if not self.prompt_start_new_file():
+                        return
+                if not self.output_path:
+                    return
+                current_state = self.model.state.app.acquiring.get()
 
-                    if current_state == 0:
-                        self.model.state.app.acquiring.set(not current_state)
-                        current_time = time.time()
-                        self.model.start_time = current_time
-                    current_state = self.model.state.app.tracking.get()
-                    self.model.state.app.tracking.set(not current_state)
+                if current_state == 0:
+                    self.model.state.app.acquiring.set(not current_state)
+                    current_time = time.time()
+                    self.model.start_time = current_time
+                current_state = self.model.state.app.tracking.get()
+                self.model.state.app.tracking.set(not current_state)
 
     def start_tracking_file(self):
         self.model.state.app.tracking_file.set(True)
@@ -6994,6 +7090,52 @@ class Controller:
             self.model.state.table.clear.set(True)
             self.model.state.graph.clear.set(True)
             self.reset_model_variables()
+
+    def prompt_start_new_file(self) -> bool:
+        popup = tk.Toplevel(self.view.root)
+        popup.title("Warning")
+        icon_path = os.path.join(images_folder, 'vt_icon.ICO')
+        try:
+            popup.iconbitmap(icon_path)
+        except Exception:
+            pass
+        popup.resizable(False, False)
+        popup.transient(self.view.root)
+        popup.grab_set()
+
+        message = (
+            "You need to set up an output file (File -> New File).\n"
+            "Start a new file now?"
+        )
+        label = tk.Label(popup, text=message)
+        label.pack(padx=20, pady=(20, 10))
+
+        button_frame = tk.Frame(popup)
+        button_frame.pack(padx=20, pady=(0, 20))
+
+        result = {"start": False}
+
+        def on_start() -> None:
+            result["start"] = True
+            popup.destroy()
+
+        def on_cancel() -> None:
+            popup.destroy()
+
+        start_button = tk.Button(button_frame, text="Start New File", command=on_start)
+        start_button.pack(side=tk.LEFT, padx=(0, 10))
+        start_button.focus_set()
+
+        cancel_button = tk.Button(button_frame, text="Cancel", command=on_cancel)
+        cancel_button.pack(side=tk.LEFT)
+
+        popup.protocol("WM_DELETE_WINDOW", on_cancel)
+        popup.wait_window()
+
+        if not result["start"]:
+            return False
+
+        return self.create_new_file(ask_confirmation=False)
 
 
     def create_new_file(self, *, ask_confirmation: bool = True) -> bool:

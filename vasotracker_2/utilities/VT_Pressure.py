@@ -365,7 +365,7 @@ class PressureController:
             )
             return
 
-        monitor = LinkMonitor(expected_rx_hz=5.0, warmup_s=1.2, stale_s=2.5)
+        monitor = LinkMonitor(expected_rx_hz=5.0, warmup_s=2.0, stale_s=5.0)
         device = ArduinoPressureDevice(worker=None)
         last_status: Dict[str, Optional[str]] = {"event": None}
 
@@ -409,11 +409,11 @@ class PressureController:
                 age = info.get("age")
                 if age:
                     self._notify_status_async(
-                        f"VasoMoto telemetry stale ({age:.1f}s gap).",
+                        f"VasoMoto telemetry paused ({age:.1f}s gap).",
                         log=False,
                     )
                 else:
-                    self._notify_status_async("VasoMoto telemetry stale.", log=False)
+                    self._notify_status_async("VasoMoto telemetry paused.", log=False)
             elif event == "error":
                 message = info.get("message") or "Unknown error"
                 self._notify_status_async(
@@ -421,7 +421,10 @@ class PressureController:
                     persist=True,
                 )
             elif event == "closed":
-                self._notify_status_async(f"VasoMoto connection closed ({port_name}).", log=False)
+                self._notify_status_async(
+                    f"VasoMoto connection closed ({port_name}). Retrying...",
+                    log=False,
+                )
 
         worker = ArduinoSerialWorker(
             port=None if auto_detect else requested,
