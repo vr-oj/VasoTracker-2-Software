@@ -484,7 +484,6 @@ class DataAcqPaneState:
     caliper_length: DoubleVar = field(default_factory=DoubleVar)
     countdown: StringVar = field(default_factory=lambda: StringVar(value="0:00:00"))
     device_set_pressure: StringVar = field(default_factory=lambda: StringVar(value="0.0"))
-    device_set_pressure_half: StringVar = field(default_factory=lambda: StringVar(value="N/A"))
 
 
 @dataclass
@@ -570,6 +569,7 @@ class TableState:
     label: StringVar = field(default_factory=StringVar)
     ref_diam: DoubleVar = field(default_factory=DoubleVar)
     rows_to_add: List[str] = field(default_factory=list)
+    rows: List[List[Any]] = field(default_factory=list)
     dirty: BooleanVar = field(default_factory=BooleanVar)
     dirty_marker: BooleanVar = field(default_factory=BooleanVar)
     clear: BooleanVar = field(default_factory=BooleanVar)
@@ -1209,6 +1209,26 @@ class Model:
         self.table_writer = csv.writer(self.table_file)
         self.table_writer.writerow(self.state.table.headers())
         self.table_file.flush()
+        self.state.table.rows.clear()
+
+    def _rewrite_table_file(self) -> None:
+        table_path = getattr(self, "table_path", None)
+        if not table_path:
+            return
+        try:
+            if getattr(self, "table_file", None) is not None:
+                try:
+                    self.table_file.close()
+                except Exception:
+                    pass
+            self.table_file = open(table_path, "w", newline="")
+            self.table_writer = csv.writer(self.table_file)
+            self.table_writer.writerow(self.state.table.headers())
+            for row in self.state.table.rows:
+                self.table_writer.writerow(row)
+            self.table_file.flush()
+        except Exception as exc:
+            print("Failed to rewrite table file:", exc)
 
     def _resolve_set_pressure(self) -> float:
         """Return the most recent commanded pressure setpoint."""
@@ -2860,6 +2880,7 @@ class Model:
         ]
         self.table_writer.writerow(values)
         self.table_file.flush()
+        table.rows.append(values)
 
         disp_values = [
             str(self.current_table_row),  # Add row number
@@ -2879,6 +2900,15 @@ class Model:
         table.dirty.set(True)
         table.dirty_marker.set(True)
         self.current_table_row += 1
+
+    def delete_table_rows(self, row_ids: Iterable[str]) -> None:
+        row_id_set = {str(row_id) for row_id in row_ids if row_id is not None}
+        if not row_id_set:
+            return
+        table = self.state.table
+        if table.rows:
+            table.rows[:] = [row for row in table.rows if str(row[0]) not in row_id_set]
+        self._rewrite_table_file()
 
 def make_entry_factory(self):
     def make_entry(EntryType: Type[tk.Widget], row, column=1, sticky="",padx=0, pady=2, disabled=False, **kwargs):
@@ -3712,7 +3742,6 @@ class DataAcquisitionPane(ToolbarPane):
         self._device_set_pressure_trace = protocol_state.device_set_pressure.trace_add(
             "write", lambda *_: sv.device_set_pressure.set(protocol_state.device_set_pressure.get())
         )
-        self._half_pressure_trace = None
         self.bind("<Destroy>", self._on_destroy, add="+")
 
         self.pack(side=tk.LEFT, anchor=tk.N, padx=5, pady=5, fill=tk.Y)
@@ -3772,7 +3801,7 @@ class DataAcquisitionPane(ToolbarPane):
 
         ctk.CTkLabel(
             self,
-            text="Selected pressure / 2 (mmHg):",
+            text="Selected pressure (mmHg):",
             anchor="center",
             font=(default_font, default_font_size),
         ).grid(row=5, column=0, columnspan=2, padx=(20, 10), pady=(10, 0), sticky=tk.EW)
@@ -3782,9 +3811,9 @@ class DataAcquisitionPane(ToolbarPane):
             anchor="center",
             font=(default_font, default_font_size),
         ).grid(row=5, column=2, columnspan=2, padx=(10, 30), pady=(10, 0), sticky=tk.EW)
-        self.device_set_pressure_half_entry = ctk.CTkEntry(
+        self.device_set_pressure_entry = ctk.CTkEntry(
             self,
-            textvariable=sv.device_set_pressure_half,
+            textvariable=sv.device_set_pressure,
             font=(default_font, entry_font_size, "bold"),
             justify=justify,
             width=entry_width,
@@ -3792,7 +3821,7 @@ class DataAcquisitionPane(ToolbarPane):
             text_color=color_vt,
             state=tk.DISABLED,
         )
-        self.device_set_pressure_half_entry.grid(
+        self.device_set_pressure_entry.grid(
             row=6, column=0, columnspan=2, padx=(20, 10), pady=5, sticky=tk.EW
         )
         self.stretch_delta_entry = ctk.CTkEntry(
@@ -3809,18 +3838,6 @@ class DataAcquisitionPane(ToolbarPane):
             row=6, column=2, columnspan=2, padx=(10, 30), pady=5, sticky=tk.EW
         )
 
-        def _refresh_half_pressure(*_args) -> None:
-            value = safe_var_float(sv.device_set_pressure, default=float("nan"))
-            if math.isnan(value):
-                safe_var_set(sv.device_set_pressure_half, "N/A")
-            else:
-                safe_var_set(sv.device_set_pressure_half, f"{value / 2.0:.1f}")
-
-        _refresh_half_pressure()
-        self._half_pressure_trace = sv.device_set_pressure.trace_add(
-            "write", _refresh_half_pressure
-        )
-
     def _on_destroy(self, event) -> None:
         if event.widget is not self:
             return
@@ -3834,15 +3851,6 @@ class DataAcquisitionPane(ToolbarPane):
         except tk.TclError:
             pass
         self._device_set_pressure_trace = None
-        half_trace = getattr(self, "_half_pressure_trace", None)
-        if half_trace:
-            try:
-                self.model_vars.toolbar.data_acq.device_set_pressure.trace_remove(
-                    "write", half_trace
-                )
-            except tk.TclError:
-                pass
-        self._half_pressure_trace = None
 
 
 
@@ -5688,6 +5696,14 @@ class TableFrame(ttk.Frame):
         self.label_entry.grid(row=0, column=1)
         self.add_button = ctk.CTkButton(table_controls, text="Add", font=(default_font, default_font_size), width=80, text_color="black")
         self.add_button.grid(row=0, column=2, padx=padx)
+        self.delete_button = ctk.CTkButton(
+            table_controls,
+            text="Delete",
+            font=(default_font, default_font_size),
+            width=80,
+            text_color="black",
+        )
+        self.delete_button.grid(row=0, column=3, padx=padx)
 
         ctk.CTkLabel(table_controls, text="Ref Diameter:", font=(default_font, default_font_size)).grid(
             row=0, column=4, padx=(20, 0)
@@ -5772,6 +5788,7 @@ class TableFrame(ttk.Frame):
     def clear_table(self):
         for item in self.table.get_children():
             self.table.delete(item)
+        self.state_vars.table.rows.clear()
         self.state_vars.table.clear.set(False)
 
 def resize_image_to_fit(im: Image, width: int, height: int):
@@ -6471,7 +6488,10 @@ class Controller:
         #tb.start_stop.record_button.configure(command=self.record_data)
         tb.start_stop.snapshot_button.configure(command=self.take_snapshot)
         self.view.table.add_button.configure(command=self.add_table_row)
+        self.view.table.delete_button.configure(command=self.delete_table_row)
         self.view.table.ref_button.configure(command=self.set_ref_diameter)
+        self.view.table.table.bind("<Delete>", self.delete_table_row)
+        self.view.table.table.bind("<BackSpace>", self.delete_table_row)
 
         tb.pressure_control_settings.set_pressure_button.configure(command=self.update_set_pressure)
         tb.pressure_control_settings.pressure_connect_button.configure(command=self.open_pressure_settings)
@@ -6824,6 +6844,22 @@ class Controller:
 
     def add_table_row(self):
         self.model.add_table_row()
+
+    def delete_table_row(self, event=None):
+        table_widget = self.view.table.table
+        selection = table_widget.selection()
+        if not selection:
+            return "break" if event is not None else None
+        row_ids = []
+        for item_id in selection:
+            values = table_widget.item(item_id, "values")
+            if values:
+                row_ids.append(str(values[0]))
+        for item_id in selection:
+            table_widget.delete(item_id)
+        self.model.delete_table_rows(row_ids)
+        if event is not None:
+            return "break"
 
     def update_set_pressure(self):
         new_pressure_value = safe_var_float(
