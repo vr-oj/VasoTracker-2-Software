@@ -81,7 +81,7 @@ import sys
 import threading
 import time
 import traceback
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Type
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple, Type
 import webbrowser
 # Suppress pygame welcome message
 sys.stdout = open(os.devnull, 'w')
@@ -486,6 +486,19 @@ class DataAcqPaneState:
     device_set_pressure: StringVar = field(default_factory=lambda: StringVar(value="0.0"))
 
 
+@dataclass
+class StretchHelperState:
+    use_setpoint: BooleanVar = field(default_factory=BooleanVar)
+    setup_active: BooleanVar = field(default_factory=BooleanVar)
+    setup_complete: BooleanVar = field(default_factory=BooleanVar)
+    baseline_ready: BooleanVar = field(default_factory=BooleanVar)
+    baseline_set: BooleanVar = field(default_factory=BooleanVar)
+    setpoint_display: StringVar = field(default_factory=lambda: StringVar(value="N/A"))
+    measured_display: StringVar = field(default_factory=lambda: StringVar(value="N/A"))
+    delta_display: StringVar = field(default_factory=lambda: StringVar(value="%ΔID at 60: N/A"))
+    status: StringVar = field(default_factory=lambda: StringVar(value="Not started"))
+
+
 
 @dataclass
 class ImageDimensionsPaneState:
@@ -537,6 +550,7 @@ class ToolbarState:
     caliper_roi: CaliperROIPaneState = field(default_factory=CaliperROIPaneState)
     plotting: PlottingPaneState = field(default_factory=PlottingPaneState)
     data_acq: DataAcqPaneState = field(default_factory=DataAcqPaneState)
+    stretch_helper: StretchHelperState = field(default_factory=StretchHelperState)
     image_dim: ImageDimensionsPaneState = field(
         default_factory=ImageDimensionsPaneState
     )
@@ -1094,6 +1108,13 @@ class Model:
         self._ui_scheduler_cancel: Optional[Callable[[Any], None]] = None
         self._deferred_jobs: Dict[str, Any] = {}
         self._pending_updates: Dict[str, Tuple[Any, float]] = {}
+        self._stretch_baseline_id: Optional[float] = None
+        self._stretch_id_buffer: Deque[float] = deque(maxlen=25)
+        self._stretch_last_id: Optional[float] = None
+        self._stretch_last_delta: Optional[float] = None
+        self._stretch_frozen_delta_display: Optional[str] = None
+        self._stretch_frozen_status: Optional[str] = None
+        self._stretch_use_setpoint_autoset = True
 
 
         try:
@@ -1226,6 +1247,83 @@ class Model:
         safe_var_set(tb.pressure_protocol.hold_pressure, True)
 
         tb.start_stop.record.set(True)
+        self.reset_stretch_helper()
+
+    def reset_stretch_helper(self) -> None:
+        self._stretch_baseline_id = None
+        self._stretch_id_buffer.clear()
+        self._stretch_last_id = None
+        self._stretch_last_delta = None
+        self._stretch_frozen_delta_display = None
+        self._stretch_frozen_status = None
+        self._stretch_use_setpoint_autoset = True
+        stretch = self.state.toolbar.stretch_helper
+        safe_var_set(stretch.use_setpoint, False)
+        safe_var_set(stretch.setup_active, False)
+        safe_var_set(stretch.setup_complete, False)
+        safe_var_set(stretch.baseline_ready, False)
+        safe_var_set(stretch.baseline_set, False)
+        safe_var_set(stretch.delta_display, "%ΔID at 60: N/A")
+        safe_var_set(stretch.status, "Not started")
+        safe_var_set(stretch.setpoint_display, "N/A")
+        safe_var_set(stretch.measured_display, "N/A")
+
+    def start_stretch_setup(self) -> None:
+        stretch = self.state.toolbar.stretch_helper
+        self._stretch_baseline_id = None
+        self._stretch_id_buffer.clear()
+        self._stretch_last_id = None
+        self._stretch_last_delta = None
+        self._stretch_frozen_delta_display = None
+        self._stretch_frozen_status = None
+        self._stretch_use_setpoint_autoset = True
+        safe_var_set(stretch.setup_active, True)
+        safe_var_set(stretch.setup_complete, False)
+        safe_var_set(stretch.baseline_set, False)
+        safe_var_set(stretch.baseline_ready, False)
+        safe_var_set(stretch.delta_display, "%ΔID at 60: N/A")
+        safe_var_set(stretch.status, "Ready: set 60 mmHg and capture baseline")
+
+    def capture_stretch_baseline(self) -> None:
+        stretch = self.state.toolbar.stretch_helper
+        try:
+            if not stretch.setup_active.get() or stretch.setup_complete.get():
+                return
+        except Exception:
+            return
+        try:
+            if not stretch.baseline_ready.get():
+                return
+        except Exception:
+            return
+        baseline_value = None
+        if self._stretch_id_buffer:
+            baseline_value = float(np.median(np.array(self._stretch_id_buffer, dtype=float)))
+        elif self._stretch_last_id is not None:
+            baseline_value = float(self._stretch_last_id)
+        if baseline_value is None or math.isnan(baseline_value) or baseline_value <= 0:
+            return
+        self._stretch_baseline_id = baseline_value
+        self._stretch_last_delta = 0.0
+        safe_var_set(stretch.baseline_set, True)
+        safe_var_set(stretch.delta_display, "%ΔID at 60: 0.0%")
+        safe_var_set(stretch.status, "Baseline captured; start stretch")
+
+    def finish_stretch_setup(self) -> None:
+        stretch = self.state.toolbar.stretch_helper
+        try:
+            if not stretch.baseline_set.get():
+                return
+        except Exception:
+            return
+        self._stretch_frozen_delta_display = stretch.delta_display.get()
+        self._stretch_frozen_status = stretch.status.get()
+        safe_var_set(stretch.setup_active, False)
+        safe_var_set(stretch.setup_complete, True)
+        safe_var_set(stretch.baseline_ready, False)
+
+    def reset_stretch_setup(self) -> None:
+        self.reset_stretch_helper()
 
     def setup_default_ui_state_loadfile(self):
         tb = self.state.toolbar
@@ -2102,6 +2200,164 @@ class Model:
             description = metadata_json
             self.tiff_writer2.write(image, description=description)
 
+    def _update_stretch_helper(self) -> None:
+        tb = self.state.toolbar
+        stretch = tb.stretch_helper
+        pref = 60.0
+        setpoint_tol = 2.0
+        pressure_tol = 5.0
+        target_pct = -30.0
+        tol_pct = 10.0
+
+        setpoint_value = safe_var_float(
+            tb.pressure_protocol.device_set_pressure, default=float("nan")
+        )
+        try:
+            setpoint_source = str(tb.pressure_protocol.device_set_source.get() or "")
+        except Exception:
+            setpoint_source = ""
+        setpoint_available = (
+            setpoint_source.lower() not in ("", "init")
+            and not math.isnan(setpoint_value)
+        )
+
+        measured_value = safe_var_float(tb.data_acq.pressure, default=float("nan"))
+        measured_available = not math.isnan(measured_value)
+        controller = self.pressure_controller
+        if controller is not None:
+            try:
+                p1, p2, _ = controller.get_latest()
+            except Exception:
+                p1 = p2 = None
+            measured_vals = []
+            for value in (p1, p2):
+                try:
+                    if value is not None and not math.isnan(float(value)):
+                        measured_vals.append(float(value))
+                except Exception:
+                    pass
+            if measured_vals:
+                measured_available = True
+                measured_value = float(sum(measured_vals) / len(measured_vals))
+
+        setpoint_display = (
+            f"{setpoint_value:.1f} mmHg" if setpoint_available else "N/A"
+        )
+        measured_display = (
+            f"{measured_value:.1f} mmHg" if measured_available else "N/A"
+        )
+        safe_var_set(stretch.setpoint_display, setpoint_display)
+        safe_var_set(stretch.measured_display, measured_display)
+
+        try:
+            setup_active = bool(stretch.setup_active.get())
+        except Exception:
+            setup_active = False
+        try:
+            setup_complete = bool(stretch.setup_complete.get())
+        except Exception:
+            setup_complete = False
+
+        if setup_complete:
+            safe_var_set(stretch.baseline_ready, False)
+            if self._stretch_frozen_delta_display is not None:
+                safe_var_set(stretch.delta_display, self._stretch_frozen_delta_display)
+            if self._stretch_frozen_status is not None:
+                safe_var_set(stretch.status, self._stretch_frozen_status)
+            return
+
+        if not setup_active:
+            safe_var_set(stretch.baseline_ready, False)
+            safe_var_set(stretch.baseline_set, False)
+            safe_var_set(stretch.delta_display, "%ΔID at 60: N/A")
+            safe_var_set(stretch.status, "Not started")
+            return
+
+        if self._stretch_use_setpoint_autoset and setpoint_available:
+            safe_var_set(stretch.use_setpoint, True)
+            self._stretch_use_setpoint_autoset = False
+
+        try:
+            use_setpoint = bool(stretch.use_setpoint.get())
+        except Exception:
+            use_setpoint = False
+
+        setpoint_ok = True
+        if use_setpoint:
+            if setpoint_available:
+                setpoint_ok = abs(setpoint_value - pref) <= setpoint_tol
+            else:
+                setpoint_ok = False
+
+        measured_ok = True
+        if measured_available:
+            measured_ok = abs(measured_value - pref) <= pressure_tol
+
+        baseline_ready = setpoint_ok and measured_ok
+        safe_var_set(stretch.baseline_ready, baseline_ready)
+
+        current_id = None
+        if self.state.diameters is not None:
+            try:
+                current_id = float(self.state.diameters.avg_inner_diam)
+            except Exception:
+                current_id = None
+            if current_id is not None and (math.isnan(current_id) or current_id <= 0):
+                current_id = None
+        try:
+            if not tb.analysis.ID.get():
+                current_id = None
+        except Exception:
+            pass
+
+        if current_id is not None:
+            self._stretch_last_id = current_id
+
+        if baseline_ready and current_id is not None:
+            self._stretch_id_buffer.append(current_id)
+        else:
+            self._stretch_id_buffer.clear()
+
+        baseline_set = self._stretch_baseline_id is not None
+        safe_var_set(stretch.baseline_set, baseline_set)
+
+        if not baseline_set:
+            safe_var_set(stretch.delta_display, "%ΔID at 60: N/A")
+            if use_setpoint and not setpoint_ok:
+                status = f"Waiting for setpoint = {pref:.0f} mmHg"
+            elif measured_available and not measured_ok:
+                status = "Setpoint ok; waiting for measured pressure"
+            else:
+                status = "Ready to capture baseline"
+            safe_var_set(stretch.status, status)
+            return
+
+        current_eval = None
+        if baseline_ready and self._stretch_id_buffer:
+            current_eval = float(np.median(np.array(self._stretch_id_buffer, dtype=float)))
+        elif current_id is not None:
+            current_eval = float(current_id)
+
+        if baseline_ready and current_eval is not None and self._stretch_baseline_id:
+            delta = ((current_eval - self._stretch_baseline_id) / self._stretch_baseline_id) * 100.0
+            self._stretch_last_delta = delta
+            safe_var_set(stretch.delta_display, f"%ΔID at 60: {delta:.1f}%")
+            if delta <= (target_pct - tol_pct):
+                status_label = "Beyond"
+            elif delta >= (target_pct + tol_pct):
+                status_label = "Approaching"
+            else:
+                status_label = "In range"
+            status = f"Status: {status_label}"
+        else:
+            if self._stretch_last_delta is not None:
+                safe_var_set(
+                    stretch.delta_display, f"%ΔID at 60: {self._stretch_last_delta:.1f}%"
+                )
+            status = "Hold at 60 mmHg to evaluate"
+
+        safe_var_set(stretch.status, status)
+
     def process_updates(self) -> bool:
         if not self.run_acq_thread:
             return False
@@ -2128,6 +2384,11 @@ class Model:
                 controller.poll_latest()
             except Exception:
                 pass
+
+        try:
+            self._update_stretch_helper()
+        except Exception:
+            traceback.print_exc()
 
         return did_work
 
@@ -3430,6 +3691,7 @@ class DataAcquisitionPane(ToolbarPane):
         self.model_vars = model_vars
         sv = model_vars.toolbar.data_acq
         protocol_state = model_vars.toolbar.pressure_protocol
+        stretch = model_vars.toolbar.stretch_helper
         sv.device_set_pressure.set(protocol_state.device_set_pressure.get())
         self._device_set_pressure_trace = protocol_state.device_set_pressure.trace_add(
             "write", lambda *_: sv.device_set_pressure.set(protocol_state.device_set_pressure.get())
@@ -3509,6 +3771,107 @@ class DataAcquisitionPane(ToolbarPane):
         )
         self.device_set_pressure_entry.grid(row=6, column=0, columnspan=4, padx=(20, 30), pady=5, sticky=tk.EW)
 
+        stretch_frame = ctk.CTkFrame(self, fg_color="transparent")
+        stretch_frame.grid(row=7, column=0, columnspan=4, padx=(20, 30), pady=(10, 5), sticky=tk.EW)
+        for col in range(4):
+            stretch_frame.grid_columnconfigure(col, weight=1)
+
+        ctk.CTkLabel(
+            stretch_frame,
+            text="Stretch Helper",
+            font=(default_font, default_font_size, "bold"),
+        ).grid(row=0, column=0, columnspan=4, sticky=tk.W)
+        ctk.CTkLabel(
+            stretch_frame,
+            text="Setpoint:",
+            font=(default_font, default_font_size - 1),
+        ).grid(row=1, column=0, sticky=tk.E, padx=(0, 5))
+        self.stretch_setpoint_label = ctk.CTkLabel(
+            stretch_frame,
+            textvariable=stretch.setpoint_display,
+            font=(default_font, default_font_size - 1, "bold"),
+        )
+        self.stretch_setpoint_label.grid(row=1, column=1, sticky=tk.W)
+        ctk.CTkLabel(
+            stretch_frame,
+            text="Measured:",
+            font=(default_font, default_font_size - 1),
+        ).grid(row=1, column=2, sticky=tk.E, padx=(10, 5))
+        self.stretch_measured_label = ctk.CTkLabel(
+            stretch_frame,
+            textvariable=stretch.measured_display,
+            font=(default_font, default_font_size - 1, "bold"),
+        )
+        self.stretch_measured_label.grid(row=1, column=3, sticky=tk.W)
+
+        self.stretch_use_setpoint = ctk.CTkCheckBox(
+            stretch_frame,
+            text="Use setpoint for gating",
+            font=(default_font, default_font_size - 1),
+            variable=stretch.use_setpoint,
+            checkbox_height=18,
+            checkbox_width=18,
+        )
+        self.stretch_use_setpoint.grid(
+            row=2, column=0, columnspan=4, sticky=tk.W, pady=(2, 2)
+        )
+
+        self.stretch_delta_label = ctk.CTkLabel(
+            stretch_frame,
+            textvariable=stretch.delta_display,
+            font=(default_font, default_font_size - 1, "bold"),
+            anchor="w",
+            justify="left",
+        )
+        self.stretch_delta_label.grid(row=3, column=0, columnspan=4, sticky=tk.W)
+
+        self.stretch_status_label = ctk.CTkLabel(
+            stretch_frame,
+            textvariable=stretch.status,
+            font=(default_font, default_font_size - 1),
+            anchor="w",
+            justify="left",
+        )
+        self.stretch_status_label.grid(row=4, column=0, columnspan=4, sticky=tk.W)
+
+        self.stretch_start_button = ctk.CTkButton(
+            stretch_frame,
+            text="Start Stretch Setup",
+            font=(default_font, default_font_size - 1),
+            height=24,
+        )
+        self.stretch_start_button.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(4, 2))
+
+        self.stretch_capture_button = ctk.CTkButton(
+            stretch_frame,
+            text="Capture Baseline (Start of Stretch)",
+            font=(default_font, default_font_size - 1),
+            height=24,
+        )
+        self.stretch_capture_button.grid(row=6, column=0, columnspan=4, sticky=tk.EW, pady=(2, 2))
+
+        self.stretch_finish_button = ctk.CTkButton(
+            stretch_frame,
+            text="Finish Stretch Setup",
+            font=(default_font, default_font_size - 1),
+            height=24,
+        )
+        self.stretch_finish_button.grid(row=5, column=2, columnspan=2, sticky=tk.EW, pady=(4, 2))
+
+        self.stretch_reset_button = ctk.CTkButton(
+            stretch_frame,
+            text="Reset",
+            font=(default_font, default_font_size - 1),
+            height=24,
+        )
+        self.stretch_reset_button.grid(row=7, column=0, columnspan=4, sticky=tk.EW, pady=(2, 0))
+
+        stretch.setup_active.trace_add("write", self._refresh_stretch_buttons)
+        stretch.setup_complete.trace_add("write", self._refresh_stretch_buttons)
+        stretch.baseline_ready.trace_add("write", self._refresh_stretch_buttons)
+        stretch.baseline_set.trace_add("write", self._refresh_stretch_buttons)
+        self._refresh_stretch_buttons()
+
     def _on_destroy(self, event) -> None:
         if event.widget is not self:
             return
@@ -3522,6 +3885,38 @@ class DataAcquisitionPane(ToolbarPane):
         except tk.TclError:
             pass
         self._device_set_pressure_trace = None
+
+    def _refresh_stretch_buttons(self, *_args) -> None:
+        stretch = self.model_vars.toolbar.stretch_helper
+        try:
+            active = bool(stretch.setup_active.get())
+        except Exception:
+            active = False
+        try:
+            complete = bool(stretch.setup_complete.get())
+        except Exception:
+            complete = False
+        try:
+            baseline_ready = bool(stretch.baseline_ready.get())
+        except Exception:
+            baseline_ready = False
+        try:
+            baseline_set = bool(stretch.baseline_set.get())
+        except Exception:
+            baseline_set = False
+
+        start_state = tk.NORMAL if (not active and not complete) else tk.DISABLED
+        capture_state = tk.NORMAL if (active and baseline_ready and not baseline_set) else tk.DISABLED
+        finish_state = tk.NORMAL if (active and baseline_set) else tk.DISABLED
+        reset_state = tk.NORMAL if (active or complete or baseline_set) else tk.DISABLED
+
+        try:
+            self.stretch_start_button.configure(state=start_state)
+            self.stretch_capture_button.configure(state=capture_state)
+            self.stretch_finish_button.configure(state=finish_state)
+            self.stretch_reset_button.configure(state=reset_state)
+        except tk.TclError:
+            pass
 
 
 
@@ -5984,6 +6379,10 @@ class Controller:
         tb.pressure_control_settings.set_pressure_button.configure(command=self.update_set_pressure)
         tb.pressure_control_settings.pressure_connect_button.configure(command=self.open_pressure_settings)
         tb.pressure_control_settings.pressure_settings_button.configure(command=self.open_pressure_protocol_settings)
+        tb.data_acq.stretch_start_button.configure(command=self.start_stretch_setup)
+        tb.data_acq.stretch_capture_button.configure(command=self.capture_stretch_baseline)
+        tb.data_acq.stretch_finish_button.configure(command=self.finish_stretch_setup)
+        tb.data_acq.stretch_reset_button.configure(command=self.reset_stretch_setup)
 
 
     def bind_checkboxes(self):
@@ -6338,6 +6737,18 @@ class Controller:
         if pane is not None:
             pane._issue_manual_setpoint(new_pressure_value, update_table=True)
 
+    def start_stretch_setup(self):
+        self.model.start_stretch_setup()
+
+    def capture_stretch_baseline(self):
+        self.model.capture_stretch_baseline()
+
+    def finish_stretch_setup(self):
+        self.model.finish_stretch_setup()
+
+    def reset_stretch_setup(self):
+        self.model.reset_stretch_setup()
+
     def open_pressure_settings(self):
         controller = self.pressure_controller
         if controller is not None:
@@ -6371,6 +6782,7 @@ class Controller:
         self.model.state.cam_show.slider_position_manual.set(0)
         self.model.state.camera.reinitialize()
         self.model.state.frames_elapsed = 0
+        self.model.reset_stretch_helper()
 
     def menu_analyze_file(self):
         # TODO: Probably need to reset everything here.
