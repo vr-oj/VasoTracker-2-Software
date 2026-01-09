@@ -3691,7 +3691,6 @@ class DataAcquisitionPane(ToolbarPane):
         self.model_vars = model_vars
         sv = model_vars.toolbar.data_acq
         protocol_state = model_vars.toolbar.pressure_protocol
-        stretch = model_vars.toolbar.stretch_helper
         sv.device_set_pressure.set(protocol_state.device_set_pressure.get())
         self._device_set_pressure_trace = protocol_state.device_set_pressure.trace_add(
             "write", lambda *_: sv.device_set_pressure.set(protocol_state.device_set_pressure.get())
@@ -3771,107 +3770,6 @@ class DataAcquisitionPane(ToolbarPane):
         )
         self.device_set_pressure_entry.grid(row=6, column=0, columnspan=4, padx=(20, 30), pady=5, sticky=tk.EW)
 
-        stretch_frame = ctk.CTkFrame(self, fg_color="transparent")
-        stretch_frame.grid(row=7, column=0, columnspan=4, padx=(20, 30), pady=(10, 5), sticky=tk.EW)
-        for col in range(4):
-            stretch_frame.grid_columnconfigure(col, weight=1)
-
-        ctk.CTkLabel(
-            stretch_frame,
-            text="Stretch Helper",
-            font=(default_font, default_font_size, "bold"),
-        ).grid(row=0, column=0, columnspan=4, sticky=tk.W)
-        ctk.CTkLabel(
-            stretch_frame,
-            text="Setpoint:",
-            font=(default_font, default_font_size - 1),
-        ).grid(row=1, column=0, sticky=tk.E, padx=(0, 5))
-        self.stretch_setpoint_label = ctk.CTkLabel(
-            stretch_frame,
-            textvariable=stretch.setpoint_display,
-            font=(default_font, default_font_size - 1, "bold"),
-        )
-        self.stretch_setpoint_label.grid(row=1, column=1, sticky=tk.W)
-        ctk.CTkLabel(
-            stretch_frame,
-            text="Measured:",
-            font=(default_font, default_font_size - 1),
-        ).grid(row=1, column=2, sticky=tk.E, padx=(10, 5))
-        self.stretch_measured_label = ctk.CTkLabel(
-            stretch_frame,
-            textvariable=stretch.measured_display,
-            font=(default_font, default_font_size - 1, "bold"),
-        )
-        self.stretch_measured_label.grid(row=1, column=3, sticky=tk.W)
-
-        self.stretch_use_setpoint = ctk.CTkCheckBox(
-            stretch_frame,
-            text="Use setpoint for gating",
-            font=(default_font, default_font_size - 1),
-            variable=stretch.use_setpoint,
-            checkbox_height=18,
-            checkbox_width=18,
-        )
-        self.stretch_use_setpoint.grid(
-            row=2, column=0, columnspan=4, sticky=tk.W, pady=(2, 2)
-        )
-
-        self.stretch_delta_label = ctk.CTkLabel(
-            stretch_frame,
-            textvariable=stretch.delta_display,
-            font=(default_font, default_font_size - 1, "bold"),
-            anchor="w",
-            justify="left",
-        )
-        self.stretch_delta_label.grid(row=3, column=0, columnspan=4, sticky=tk.W)
-
-        self.stretch_status_label = ctk.CTkLabel(
-            stretch_frame,
-            textvariable=stretch.status,
-            font=(default_font, default_font_size - 1),
-            anchor="w",
-            justify="left",
-        )
-        self.stretch_status_label.grid(row=4, column=0, columnspan=4, sticky=tk.W)
-
-        self.stretch_start_button = ctk.CTkButton(
-            stretch_frame,
-            text="Start Stretch Setup",
-            font=(default_font, default_font_size - 1),
-            height=24,
-        )
-        self.stretch_start_button.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(4, 2))
-
-        self.stretch_capture_button = ctk.CTkButton(
-            stretch_frame,
-            text="Capture Baseline (Start of Stretch)",
-            font=(default_font, default_font_size - 1),
-            height=24,
-        )
-        self.stretch_capture_button.grid(row=6, column=0, columnspan=4, sticky=tk.EW, pady=(2, 2))
-
-        self.stretch_finish_button = ctk.CTkButton(
-            stretch_frame,
-            text="Finish Stretch Setup",
-            font=(default_font, default_font_size - 1),
-            height=24,
-        )
-        self.stretch_finish_button.grid(row=5, column=2, columnspan=2, sticky=tk.EW, pady=(4, 2))
-
-        self.stretch_reset_button = ctk.CTkButton(
-            stretch_frame,
-            text="Reset",
-            font=(default_font, default_font_size - 1),
-            height=24,
-        )
-        self.stretch_reset_button.grid(row=7, column=0, columnspan=4, sticky=tk.EW, pady=(2, 0))
-
-        stretch.setup_active.trace_add("write", self._refresh_stretch_buttons)
-        stretch.setup_complete.trace_add("write", self._refresh_stretch_buttons)
-        stretch.baseline_ready.trace_add("write", self._refresh_stretch_buttons)
-        stretch.baseline_set.trace_add("write", self._refresh_stretch_buttons)
-        self._refresh_stretch_buttons()
-
     def _on_destroy(self, event) -> None:
         if event.widget is not self:
             return
@@ -3885,6 +3783,133 @@ class DataAcquisitionPane(ToolbarPane):
         except tk.TclError:
             pass
         self._device_set_pressure_trace = None
+
+
+
+class StretchHelperPane(ctk.CTkFrame):
+    def __init__(
+        self,
+        parent,
+        model_vars: VtState,
+        *,
+        on_start: Callable[[], None],
+        on_capture: Callable[[], None],
+        on_finish: Callable[[], None],
+        on_reset: Callable[[], None],
+    ):
+        super().__init__(parent)
+        self.model_vars = model_vars
+        self._trace_ids: List[Tuple[Any, str]] = []
+        stretch = model_vars.toolbar.stretch_helper
+
+        for col in range(4):
+            self.grid_columnconfigure(col, weight=1)
+
+        self.frame_label = ctk.CTkLabel(
+            self,
+            text="Stretch Helper",
+            font=(default_font, 16, "bold"),
+            fg_color=frame_label_color,
+            height=frame_label_height,
+            text_color="white",
+        )
+        self.frame_label.grid(row=0, column=0, columnspan=4, padx=1, pady=(0, 6), sticky="nsew")
+
+        ctk.CTkLabel(
+            self,
+            text="Setpoint:",
+            font=(default_font, default_font_size - 1),
+        ).grid(row=1, column=0, sticky=tk.E, padx=(0, 6))
+        self.stretch_setpoint_label = ctk.CTkLabel(
+            self,
+            textvariable=stretch.setpoint_display,
+            font=(default_font, default_font_size - 1, "bold"),
+        )
+        self.stretch_setpoint_label.grid(row=1, column=1, sticky=tk.W)
+
+        ctk.CTkLabel(
+            self,
+            text="Measured:",
+            font=(default_font, default_font_size - 1),
+        ).grid(row=1, column=2, sticky=tk.E, padx=(10, 6))
+        self.stretch_measured_label = ctk.CTkLabel(
+            self,
+            textvariable=stretch.measured_display,
+            font=(default_font, default_font_size - 1, "bold"),
+        )
+        self.stretch_measured_label.grid(row=1, column=3, sticky=tk.W)
+
+        self.stretch_use_setpoint = ctk.CTkCheckBox(
+            self,
+            text="Use setpoint for gating",
+            font=(default_font, default_font_size - 1),
+            variable=stretch.use_setpoint,
+            checkbox_height=18,
+            checkbox_width=18,
+        )
+        self.stretch_use_setpoint.grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(6, 2))
+
+        self.stretch_delta_label = ctk.CTkLabel(
+            self,
+            textvariable=stretch.delta_display,
+            font=(default_font, default_font_size - 1, "bold"),
+            anchor="w",
+            justify="left",
+        )
+        self.stretch_delta_label.grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(2, 2))
+
+        self.stretch_status_label = ctk.CTkLabel(
+            self,
+            textvariable=stretch.status,
+            font=(default_font, default_font_size - 1),
+            anchor="w",
+            justify="left",
+        )
+        self.stretch_status_label.grid(row=4, column=0, columnspan=4, sticky=tk.W)
+
+        self.stretch_start_button = ctk.CTkButton(
+            self,
+            text="Start Stretch Setup",
+            font=(default_font, default_font_size - 1),
+            height=28,
+            command=on_start,
+        )
+        self.stretch_start_button.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(8, 4))
+
+        self.stretch_finish_button = ctk.CTkButton(
+            self,
+            text="Finish Stretch Setup",
+            font=(default_font, default_font_size - 1),
+            height=28,
+            command=on_finish,
+        )
+        self.stretch_finish_button.grid(row=5, column=2, columnspan=2, sticky=tk.EW, pady=(8, 4))
+
+        self.stretch_capture_button = ctk.CTkButton(
+            self,
+            text="Capture Baseline (Start of Stretch)",
+            font=(default_font, default_font_size - 1),
+            height=28,
+            command=on_capture,
+        )
+        self.stretch_capture_button.grid(row=6, column=0, columnspan=4, sticky=tk.EW, pady=(0, 4))
+
+        self.stretch_reset_button = ctk.CTkButton(
+            self,
+            text="Reset",
+            font=(default_font, default_font_size - 1),
+            height=28,
+            command=on_reset,
+        )
+        self.stretch_reset_button.grid(row=7, column=0, columnspan=4, sticky=tk.EW)
+
+        self._trace_ids.append((stretch.setup_active, stretch.setup_active.trace_add("write", self._refresh_stretch_buttons)))
+        self._trace_ids.append((stretch.setup_complete, stretch.setup_complete.trace_add("write", self._refresh_stretch_buttons)))
+        self._trace_ids.append((stretch.baseline_ready, stretch.baseline_ready.trace_add("write", self._refresh_stretch_buttons)))
+        self._trace_ids.append((stretch.baseline_set, stretch.baseline_set.trace_add("write", self._refresh_stretch_buttons)))
+        self._refresh_stretch_buttons()
+
+        self.bind("<Destroy>", self._on_destroy, add="+")
 
     def _refresh_stretch_buttons(self, *_args) -> None:
         stretch = self.model_vars.toolbar.stretch_helper
@@ -3918,6 +3943,15 @@ class DataAcquisitionPane(ToolbarPane):
         except tk.TclError:
             pass
 
+    def _on_destroy(self, event) -> None:
+        if event.widget is not self:
+            return
+        for var, trace_id in self._trace_ids:
+            try:
+                var.trace_remove("write", trace_id)
+            except tk.TclError:
+                pass
+        self._trace_ids.clear()
 
 
 class ImageDimensionsPane(ToolbarPane):
@@ -5035,6 +5069,9 @@ class Menus:
 
         if _PYDAQMX_AVAILABLE:
             self.settings_menu.add_command(label="Configure Pressure Protocol")
+            self.settings_menu.add_command(label="Stretch Helper")
+        else:
+            self.settings_menu.add_command(label="Stretch Helper")
 
         notepad_menu = tk.Menu(self.menu_bar, tearoff=0)
         self.notepad_menu = notepad_menu
@@ -6379,10 +6416,6 @@ class Controller:
         tb.pressure_control_settings.set_pressure_button.configure(command=self.update_set_pressure)
         tb.pressure_control_settings.pressure_connect_button.configure(command=self.open_pressure_settings)
         tb.pressure_control_settings.pressure_settings_button.configure(command=self.open_pressure_protocol_settings)
-        tb.data_acq.stretch_start_button.configure(command=self.start_stretch_setup)
-        tb.data_acq.stretch_capture_button.configure(command=self.capture_stretch_baseline)
-        tb.data_acq.stretch_finish_button.configure(command=self.finish_stretch_setup)
-        tb.data_acq.stretch_reset_button.configure(command=self.reset_stretch_setup)
 
 
     def bind_checkboxes(self):
@@ -6459,6 +6492,9 @@ class Controller:
             settings_menu.entryconfig(
                 settings_menu.index("Configure Pressure Protocol"), command=self.show_pressure_settings
             )
+        settings_menu.entryconfig(
+            settings_menu.index("Stretch Helper"), command=self.open_stretch_helper_popup
+        )
 
         # Create the "Notepad"
         notepad_menu = menu.notepad_menu
@@ -6748,6 +6784,53 @@ class Controller:
 
     def reset_stretch_setup(self):
         self.model.reset_stretch_setup()
+
+    def open_stretch_helper_popup(self):
+        popup = getattr(self, "_stretch_helper_popup", None)
+        if popup is not None:
+            try:
+                if popup.winfo_exists():
+                    popup.lift()
+                    popup.focus_force()
+                    return
+            except Exception:
+                pass
+
+        popup = tk.Toplevel(self.view.root)
+        popup.title("Stretch Helper")
+        icon_path = os.path.join(images_folder, 'vt_icon.ICO')
+        try:
+            popup.iconbitmap(icon_path)
+        except Exception:
+            pass
+        popup.resizable(False, False)
+        popup.transient(self.view.root)
+
+        pane = StretchHelperPane(
+            popup,
+            self.model.state,
+            on_start=self.start_stretch_setup,
+            on_capture=self.capture_stretch_baseline,
+            on_finish=self.finish_stretch_setup,
+            on_reset=self.reset_stretch_setup,
+        )
+        pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        def on_close() -> None:
+            try:
+                pane.destroy()
+            except Exception:
+                pass
+            try:
+                popup.destroy()
+            except Exception:
+                pass
+            self._stretch_helper_popup = None
+            self._stretch_helper_pane = None
+
+        popup.protocol("WM_DELETE_WINDOW", on_close)
+        self._stretch_helper_popup = popup
+        self._stretch_helper_pane = pane
 
     def open_pressure_settings(self):
         controller = self.pressure_controller
