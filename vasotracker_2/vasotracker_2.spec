@@ -14,6 +14,7 @@ sys.path.insert(0, spec_dir)
 
 import version
 from version import __version__
+from PyInstaller.utils.hooks import collect_data_files
 
 # Build-time check: the Micro-Manager nightly the app auto-installs must be
 # built against the same device interface as the pymmcore we are bundling.
@@ -43,16 +44,39 @@ if not hasattr(_serial_check, "Serial"):
     )
 del _serial_check
 
-added_files = [("music", "music"), ("images", "images"), ("SampleData", "SampleData"), ('settings.toml', '.'), ('MMConfig.cfg', '.'), ('Basler.cfg', '.'), ('VasoTrackerblue.json', '.'), ('pacman', 'pacman'), ('space-invaders', 'space-invaders')]
+_data_candidates = [
+    ("music", "music"),
+    ("images", "images"),
+    ("SampleData", "SampleData"),
+    ("settings.toml", "."),
+    ("MMConfig.cfg", "."),
+    ("Basler.cfg", "."),
+    ("VasoTrackerblue.json", "."),
+    ("pacman", "pacman"),
+    ("space-invaders", "space-invaders"),
+]
+# Demo data and games are not present in every checkout and are not required
+# for acquisition. Include them when available without making lab builds fail.
+added_files = [item for item in _data_candidates if os.path.exists(item[0])]
+# PyInstaller 6.5's hook set does not collect the Sun Valley ttk Tcl theme.
+# Without these files the frozen app exits before creating its main window.
+added_files += collect_data_files("sv_ttk")
+
+artifact_version = __version__.replace(" + ", "_").replace(" ", "_")
+artifact_name = f"VasoTracker_{artifact_version}"
 
 # Conda keeps the C libraries behind Python's stdlib extension modules in
 # Library\bin, which PyInstaller misses. Without them the frozen app dies at
 # startup with "DLL load failed" (_ctypes needs ffi, pyexpat needs libexpat,
 # _ssl needs libssl/libcrypto, etc). Bundle them all explicitly.
 import glob
-_env_bin = os.path.join(sys.prefix, "Library", "bin")
+_runtime_dirs = [
+    os.path.join(sys.prefix, "Library", "bin"),
+    # Python 3.9 conda environments keep libffi and Tcl/Tk here instead.
+    os.path.join(sys.prefix, "DLLs"),
+]
 _conda_dll_patterns = [
-    "ffi*.dll",            # _ctypes
+    "*ffi*.dll",           # _ctypes (ffi*.dll or libffi*.dll)
     "*expat*.dll",         # pyexpat
     "libssl*.dll",         # _ssl
     "libcrypto*.dll",      # _ssl, _hashlib
@@ -64,10 +88,15 @@ _conda_dll_patterns = [
     "tk86*.dll",           # tkinter
 ]
 conda_binaries = []
-for _pat in _conda_dll_patterns:
-    conda_binaries += [(p, ".") for p in glob.glob(os.path.join(_env_bin, _pat))]
+for _runtime_dir in _runtime_dirs:
+    for _pat in _conda_dll_patterns:
+        conda_binaries += [
+            (p, ".") for p in glob.glob(os.path.join(_runtime_dir, _pat))
+        ]
 if not any("ffi" in os.path.basename(p).lower() for p, _ in conda_binaries):
-    raise SystemExit(f"No ffi*.dll found in {_env_bin} - frozen _ctypes would fail to load.")
+    raise SystemExit(
+        f"No libffi runtime found in {_runtime_dirs} - frozen _ctypes would fail to load."
+    )
 
 a = Analysis(
     ['vasotracker_2.py'],
@@ -88,7 +117,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name=f"vasotracker_{__version__}",
+    name=artifact_name,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -109,5 +138,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name=f"vasotracker_{__version__}",
+    name=artifact_name,
 )
