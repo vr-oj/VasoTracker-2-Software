@@ -1,2 +1,5 @@
 /build
 /dist
+
+# Local assistant/session config
+.claude/

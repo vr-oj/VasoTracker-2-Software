@@ -17,11 +17,21 @@
 ## https://stackoverflow.com/questions/37334106/opening-image-on-canvas-cropping-the-image-and-update-the-canvas
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Dict, Optional
 import numpy as np
 from skimage import measure
-from .VTutils import diff2, process_ddts
+from .VTutils import (
+    DdtResult,
+    diff2,
+    is_outlier,
+    local_std_profile,
+    process_ddts,
+    process_walls_fmd,
+    texture_changepoints,
+)
 from scipy.signal import medfilt
+from scipy.ndimage import uniform_filter1d
 
 if TYPE_CHECKING:
     from vt_mvc import Roi, Caliper, RasterDrawState
@@ -90,6 +100,141 @@ class ImageDiameters:
     avg_inner_diam: float
 
 
+def process_texture(
+    data,
+    start_x,
+    thresh_factor,
+    scale,
+    consensus=False,
+    edge_prior=None,
+    std_window=9,
+    min_seg=5,
+) -> DdtResult:
+    """Fibrous-tissue detection: wall positions are the two changepoints of
+    each profile's local-variance signal (quiet - textured - quiet). Robust
+    to interior texture by construction; protected against artefacts by the
+    same slant-consensus repair as the gradient algorithm. Inner diameter is
+    undefined for this tissue type and reported as NaN."""
+    start_x = [int(x) for x in start_x]
+    n_lines = len(data)
+    stds = [local_std_profile(sig, std_window) for sig in data]
+
+    od1 = np.zeros(n_lines)
+    od2 = np.zeros(n_lines)
+    for k, sd in enumerate(stds):
+        prior_windows = (None, None)
+        if edge_prior is not None and len(edge_prior[0]) == n_lines:
+            # Temporal repair: constrain the search near the previous frame's
+            # edges (positions are absolute; convert to profile-local).
+            p1 = float(edge_prior[0][k]) - start_x[k]
+            p2 = float(edge_prior[1][k]) - start_x[k]
+            tol = max(10.0, 0.3 * max(p2 - p1, 1.0))
+            prior_windows = ((p1 - tol, p1 + tol), (p2 - tol, p2 + tol))
+        result = texture_changepoints(
+            sd, min_seg=min_seg, i_range=prior_windows[0], j_range=prior_windows[1]
+        )
+        if result is None:
+            result = texture_changepoints(sd, min_seg=min_seg)
+        if result is None:
+            od1[k], od2[k] = 0, len(sd)
+        else:
+            od1[k], od2[k] = result
+    od1 += np.asarray(start_x, dtype=float)
+    od2 += np.asarray(start_x, dtype=float)
+
+    # Slant-aware consensus repair (parallel scanlines only): re-run the
+    # changepoint search constrained near the robust linear trend for lines
+    # that break it.
+    if consensus and n_lines >= 5 and edge_prior is None:
+        def theil_sen_predict(vals):
+            n = len(vals)
+            idx = np.arange(n, dtype=float)
+            slopes = [
+                (vals[b] - vals[a]) / (b - a)
+                for a in range(n)
+                for b in range(a + 1, n)
+            ]
+            slope = np.median(slopes)
+            intercept = np.median(vals - slope * idx)
+            return intercept + slope * idx
+
+        med_w = np.median(od2 - od1)
+        if med_w > 0:
+            pred1 = theil_sen_predict(od1)
+            pred2 = theil_sen_predict(od2)
+            tol = max(10.0, 0.3 * med_w)
+            for k, sd in enumerate(stds):
+                if (
+                    abs(od1[k] - pred1[k]) <= tol
+                    and abs(od2[k] - pred2[k]) <= tol
+                    and abs((od2[k] - od1[k]) - med_w) <= tol
+                ):
+                    continue
+                p1 = pred1[k] - start_x[k]
+                p2 = pred2[k] - start_x[k]
+                repaired = texture_changepoints(
+                    sd,
+                    min_seg=min_seg,
+                    i_range=(p1 - tol, p1 + tol),
+                    j_range=(p2 - tol, p2 + tol),
+                )
+                if repaired is not None:
+                    od1[k] = repaired[0] + start_x[k]
+                    od2[k] = repaired[1] + start_x[k]
+
+    ODS = scale * (od2 - od1)
+    IDS = np.full(n_lines, np.nan)
+    nan_pairs = np.full((n_lines, 2), np.nan)
+    return DdtResult(
+        outer_diam_pos=np.column_stack((od1, od2)).astype(int),
+        inner_diam_pos=nan_pairs,
+        od_outliers=is_outlier(np.asarray(ODS), thresh_factor),
+        id_outliers=np.zeros(n_lines, dtype=bool),
+        outer_diam=ODS,
+        inner_diam=IDS,
+    )
+
+
+def auto_smooth_factor(
+    image: np.ndarray,
+    rotate_tracking: bool,
+    current: int = 21,
+    lines_to_avg: int = 20,
+    num_lines: int = 10,
+    min_s: int = 5,
+    max_s: int = 21,
+    iters: int = 3,
+    default_detection_alg: bool = False,
+) -> Optional[int]:
+    """Choose a smoothing factor of ~1/5 of the measured vessel diameter
+    (clamped to [min_s, max_s]): large enough to suppress wall/lumen texture,
+    small enough not to blur the two walls into each other. Iterates
+    measure -> set -> re-measure since the estimate depends on the smoothing.
+    """
+    rds = SimpleNamespace(roi=None, autocaliper={}, multi_roi={})
+    s = int(np.clip(current, min_s, max_s))
+    for _ in range(iters):
+        diams = calculate_diameter(
+            image=image, rds=rds, compute_id=False, default_detection_alg=default_detection_alg,
+            lines_to_avg=lines_to_avg, num_lines=num_lines, scale=1.0,
+            smooth_factor=s, thresh_factor=5.5, filter_means=True,
+            rotate_tracking=rotate_tracking, ultrasound_tracking=False,
+        )
+        if diams is None:
+            return None
+        keep = ~diams.od_outliers if (~diams.od_outliers).any() else np.ones(len(diams.outer_diam), bool)
+        od = float(np.median(diams.outer_diam[keep]))
+        if not np.isfinite(od) or od <= 0:
+            return None
+        new_s = int(np.clip(round(od / 5), min_s, max_s))
+        if new_s % 2 == 0:
+            new_s += 1
+        if new_s == s:
+            break
+        s = new_s
+    return s
+
+
 def calculate_diameter(
     image: np.ndarray,
     rds: "RasterDrawState",
@@ -103,6 +248,9 @@ def calculate_diameter(
     filter_means: bool,
     rotate_tracking: bool,
     ultrasound_tracking: bool,
+    texture_tracking: bool = False,
+    fmd_tracking: bool = False,
+    edge_prior=None,
 ) -> Optional[ImageDiameters]:
      # Rotate the image by 90 degrees if rotate_tracking is True
 
@@ -144,17 +292,29 @@ def calculate_diameter(
 
                 start_x, start_y, end_x, end_y = start_x_new, start_y_new, end_x_new, end_y_new
 
-        # Ensure scanlines are spaced evenly along the y-axis in the rotated image
+        # Exactly `num_lines` scanlines, evenly spaced strictly inside the ROI
+        # at fractions 1/(N+1) .. N/(N+1) of its height. (The old int()-floored
+        # start/step/end + range() gave num_lines +/- 1 for many ROI heights.)
         total_height = end_y - start_y
-        space_between_lines = total_height / (num_lines + 1)
+        if fmd_tracking:
+            # B-mode speckle swamps a thin scanline; average each profile over
+            # a wide band so the scanlines tile the whole ROI with overlap.
+            lines_to_avg = max(int(lines_to_avg),
+                               int(1.5 * total_height / max(num_lines, 1)))
+        edge = max(1, int(lines_to_avg // 2))
+        line_ys = []
+        for k in range(1, num_lines + 1):
+            y = int(round(start_y + total_height * k / (num_lines + 1)))
+            y = min(max(y, start_y + edge), end_y - edge - 1)
+            line_ys.append(y)
 
-        start = int(start_y + space_between_lines)  # Always space along y-axis
-        diff = int(total_height / (num_lines + 1))
-        end = int(end_y - space_between_lines)
-
-        # Ensure correct number of lines
-        if total_height % (num_lines + 1) == 0:
-            end += 1
+        # In 90-degree mode np.rot90 (counter-clockwise) maps the vessel's
+        # right end to the top of the rotated image, so ascending rotated-y
+        # runs right-to-left across the displayed vessel. Reverse so line 1
+        # (and the first Profiles column) is the LEFT end, matching how the
+        # numbered overlay / _ROIs.png reads.
+        if rotate_tracking:
+            line_ys = line_ys[::-1]
 
         data = [
             np.average(
@@ -164,10 +324,10 @@ def calculate_diameter(
                 ],
                 axis=0
             )
-            for y in range(start, end, diff)
+            for y in line_ys
         ]
 
-        for y in range(start, end, diff):
+        for y in line_ys:
             y_pos.append((y, y))
 
         start_x = [start_x] * len(data)  # Ensure tracking alignment
@@ -206,59 +366,98 @@ def calculate_diameter(
     elif have_autocalipers:
         data = []
         start_x = []
+        # Caliper endpoints transformed into the analysis space; boxes get
+        # the same treatment above. Without this, 90-degree mode sampled the
+        # rotated image with unrotated coordinates (wrong pixels entirely).
+        caliper_points = []
         for cal in autocaliper.values():
+            x1, y1, x2, y2 = cal.x1, cal.y1, cal.x2, cal.y2
+            if rotate_tracking:
+                x1, y1, x2, y2 = y1, nx - x1, y2, nx - x2
+            caliper_points.append((x1, y1, x2, y2))
             data.append(
                 measure.profile_line(
-                    image, (cal.y1, cal.x1), (cal.y2, cal.x2), linewidth=lines_to_avg
+                    image, (y1, x1), (y2, x2), linewidth=lines_to_avg
                 )
             )
-            start_x.append(cal.x1)
+            start_x.append(x1)
 
         diff = 0
     else:
         return None
 
-    # Smooth the data
-    window = np.ones(smooth_factor)
-    if ultrasound_tracking == 0:
-        smoothed = [
-            np.convolve(window / window.sum(), sig, mode="same") for sig in data
-        ]
+    if fmd_tracking:
+        # Vascular-ultrasound / flow-mediated-dilation mode: explicit B-mode
+        # wall model (bright near/far wall reflections either side of the
+        # anechoic lumen). Inner diameter = the lumen-intima interfaces (the
+        # FMD measurement); outer = the adventitial sides. See
+        # process_walls_fmd.
+        diams = process_walls_fmd(
+            data,
+            start_x,
+            scale,
+            thresh_factor,
+            compute_id,
+            smooth_factor=smooth_factor,
+            consensus=(not have_autocalipers and single_roi),
+            edge_prior=edge_prior,
+        )
+    elif texture_tracking:
+        # Fibrous-tissue mode: walls detected as changepoints of the local
+        # texture (variance) rather than intensity gradients. See
+        # process_texture. Smoothing/gradient settings do not apply.
+        diams = process_texture(
+            data,
+            start_x,
+            thresh_factor,
+            scale,
+            consensus=(not have_autocalipers and single_roi),
+            edge_prior=edge_prior,
+        )
     else:
-        # Define the median filter window size
-        median_window = smooth_factor if smooth_factor % 2 == 1 else smooth_factor + 1  # Must be odd
-        # Apply median filtering instead of moving average smoothing
-        smoothed = [medfilt(sig, kernel_size=median_window) for sig in data]
+        # Smooth the data
+        # NOTE: uniform_filter1d(mode="nearest") is the same boxcar as
+        # convolving with np.ones(n)/n, but without the zero-padding at the
+        # profile ends, which created fake edges bigger than real vessel
+        # walls on small images.
+        if ultrasound_tracking == 0:
+            smoothed = [
+                uniform_filter1d(np.asarray(sig, dtype=float), smooth_factor, mode="nearest") for sig in data
+            ]
+        else:
+            # Define the median filter window size
+            median_window = smooth_factor if smooth_factor % 2 == 1 else smooth_factor + 1  # Must be odd
+            # Apply median filtering instead of moving average smoothing
+            smoothed = [medfilt(sig, kernel_size=median_window) for sig in data]
 
+        # Differentiate the data. There are other methods in VTutils...
+        # But this one is much faster!
+        ddts = [diff2(sig, 1) for sig in smoothed]  # Was 1 \\\\\ ULTRASOUND
+        ddts = [uniform_filter1d(sig, smooth_factor, mode="nearest") for sig in ddts]
 
-    # Differentiate the data. There are other methods in VTutils...
-    # But this one is much faster!
-    ddts = [diff2(sig, 1) for sig in smoothed]  # Was 1 \\\\\ ULTRASOUND
-    window = np.ones(smooth_factor)
-    ddts = [np.convolve(window / window.sum(), sig, mode="same") for sig in ddts]
+        if ultrasound_tracking == 0:
+            ddts = [uniform_filter1d(sig, smooth_factor, mode="nearest") for sig in ddts]
+        else:
+            # Define the median filter window size
+            median_window = smooth_factor if smooth_factor % 2 == 1 else smooth_factor + 1  # Must be odd
+            # Apply median filtering instead of moving average smoothing
+            ddts = [medfilt(sig, kernel_size=median_window) for sig in ddts]
 
-    window = np.ones(smooth_factor)
-    if ultrasound_tracking == 0:
-        ddts = [np.convolve(window / window.sum(), sig, mode="same") for sig in ddts]
-    else:
-        # Define the median filter window size
-        median_window = smooth_factor if smooth_factor % 2 == 1 else smooth_factor + 1  # Must be odd
-        # Apply median filtering instead of moving average smoothing
-        ddts = [medfilt(sig, kernel_size=median_window) for sig in ddts]
-
-
-    thresh = 0
-    diams = process_ddts(
-        ddts,
-        thresh_factor,
-        thresh,
-        nx,
-        scale,
-        start_x,
-        compute_id,
-        default_detection_alg,
-        ultrasound_tracking,
-    )
+        thresh = 0
+        diams = process_ddts(
+            ddts,
+            thresh_factor,
+            thresh,
+            nx,
+            scale,
+            start_x,
+            compute_id,
+            default_detection_alg,
+            ultrasound_tracking,
+            # All scanlines cross the same vessel only in single-ROI mode
+            consensus=(not have_autocalipers and single_roi),
+            edge_prior=edge_prior,
+        )
     if diams.outer_diam_pos.ndim == 0:
         return None
 
@@ -267,13 +466,13 @@ def calculate_diameter(
         od_y = []
         id_x = []
         id_y = []
-        for i, cal in enumerate(autocaliper.values()):
+        for i, (cx1, cy1, cx2, cy2) in enumerate(caliper_points):
             coords = _line_profile_coordinates(
-                (cal.y1, cal.x1), (cal.y2, cal.x2)
+                (cy1, cx1), (cy2, cx2)
             ).squeeze()
 
             def convert_from_lp_coords(pos, xlist, ylist):
-                if np.any(pos == 0):
+                if np.any(pos == 0) or not np.all(np.isfinite(pos)):
                     xlist.append((0, 0))
                     ylist.append((0, 0))
                     return
@@ -291,7 +490,8 @@ def calculate_diameter(
                 id_pos = diams.inner_diam_pos[i]
                 convert_from_lp_coords(id_pos, id_x, id_y)
             except IndexError:
-                breakpoint()
+                od_x.append((0, 0)); od_y.append((0, 0))
+                id_x.append((0, 0)); id_y.append((0, 0))
         od_x = np.array(od_x)
         od_y = np.array(od_y)
         id_x = np.array(id_x)

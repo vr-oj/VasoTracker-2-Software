@@ -53,9 +53,14 @@ lib64/
 # Others
 .DS_Store
 *.swp
-.docx
-.pdf
+*.docx
+*.pdf
 SampleData/
+SampleData2/
 Old/
 pacman/
 space-invaders/
+
+# Test/dev builds
+build_test/
+dist_test/

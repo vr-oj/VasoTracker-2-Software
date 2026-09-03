@@ -18,6 +18,90 @@ from scipy import ndimage
 # EDIT AT YOUR OWN RISK
 
 
+def local_std_profile(profile, window=9):
+    """Rolling standard deviation of an intensity profile. Fibrous vessels
+    barely differ from background in mean intensity but differ hugely in
+    texture, so their walls appear as steps in this signal."""
+    p = np.asarray(profile, dtype=np.float64)
+    m = ndimage.uniform_filter1d(p, window, mode="nearest")
+    m2 = ndimage.uniform_filter1d(p * p, window, mode="nearest")
+    return np.sqrt(np.maximum(m2 - m * m, 0.0))
+
+
+def texture_changepoints(signal, min_seg=5, i_range=None, j_range=None):
+    """Optimal two-changepoint split of `signal` into three constant
+    segments (minimum total squared error): quiet background - textured
+    vessel - quiet background. Thresholdless and immune to interior texture
+    by construction. Optional (lo, hi) index ranges constrain each
+    changepoint's search (used by consensus/temporal repair).
+
+    Returns (i, j) with i < j, or None if no valid split exists.
+    """
+    s = np.asarray(signal, dtype=np.float64)
+    n = len(s)
+    if n < 3 * min_seg:
+        return None
+    c1 = np.concatenate([[0.0], np.cumsum(s)])
+    c2 = np.concatenate([[0.0], np.cumsum(s * s)])
+
+    def seg_cost(a, b):
+        length = np.maximum(b - a, 1)
+        tot = c1[b] - c1[a]
+        tot2 = c2[b] - c2[a]
+        return tot2 - tot * tot / length
+
+    i_lo, i_hi = min_seg, n - 2 * min_seg
+    j_lo_all, j_hi = None, n - min_seg
+    if i_range is not None:
+        i_lo = max(i_lo, int(i_range[0]))
+        i_hi = min(i_hi, int(i_range[1]))
+    if i_hi <= i_lo:
+        return None
+
+    best_i, best_j, best_cost = None, None, np.inf
+    for i in range(i_lo, i_hi):
+        j_lo = i + min_seg
+        j_hi_eff = j_hi
+        if j_range is not None:
+            j_lo = max(j_lo, int(j_range[0]))
+            j_hi_eff = min(j_hi_eff, int(j_range[1]))
+        if j_hi_eff <= j_lo:
+            continue
+        j = np.arange(j_lo, j_hi_eff)
+        cost = seg_cost(0, i) + seg_cost(i, j) + seg_cost(j, n)
+        k = int(np.argmin(cost))
+        if cost[k] < best_cost:
+            best_i, best_j, best_cost = i, int(j[k]), float(cost[k])
+    if best_i is None:
+        return None
+    return best_i, best_j
+
+
+def detect_vessel_orientation(image, blur_sigma=3):
+    """Return True when the vessel runs horizontally across the image, i.e.
+    the 90-degree (rotated) analysis mode should be enabled.
+
+    Vessel walls are long edges parallel to the vessel axis, so a horizontal
+    vessel produces mostly vertical intensity gradients (and vice versa). The
+    blur suppresses granular texture, which contributes isotropically.
+    """
+    f = ndimage.gaussian_filter(np.asarray(image, dtype=float), blur_sigma)
+    grad_y = np.abs(np.diff(f, axis=0)).sum()
+    grad_x = np.abs(np.diff(f, axis=1)).sum()
+    return bool(grad_y > grad_x)
+
+
+def detect_fluorescence(image):
+    """Return True when the image looks like fluorescence: a near-black
+    background with sparse bright structures. Transmitted-light images have a
+    mid-gray background, so their median sits close to their bright end."""
+    im = np.asarray(image)
+    bright = np.percentile(im, 99)
+    if bright <= 0:
+        return False
+    return bool(np.median(im) < 0.25 * bright)
+
+
 def diff(sig, n):
     dx = 1 / n
     ddt = ndimage.gaussian_filter1d(sig, sigma=6, order=1, mode="nearest") / dx
@@ -31,6 +115,11 @@ def diff2(sig, n):
         np.convolve(sig, [1, -1]) / dx
     )  # ndimage.gaussian_filter1d(sig, sigma=6, order=1, mode='nearest') / dx
     ddt = np.array(ddt)
+    # The first and last elements of the full convolution are +sig[0] and
+    # -sig[-1]: boundary artifacts, not gradients. Zero them so they cannot
+    # be smeared into fake peaks by the smoothing that follows.
+    ddt[0] = 0.0
+    ddt[-1] = 0.0
     return ddt
 
 
@@ -391,7 +480,8 @@ def process_ddts2(
 
 
 def process_ddts(
-    ddts, thresh_factor, thresh, nx, scale, start_x, ID_mode, detection_mode, ultrasound_tracking
+    ddts, thresh_factor, thresh, nx, scale, start_x, ID_mode, detection_mode, ultrasound_tracking,
+    consensus=False, edge_prior=None,
 ) -> DdtResult:
     outer_diameters1_pos = []  # array for diameter data
     outer_diameters2_pos = []
@@ -401,6 +491,9 @@ def process_ddts(
     IDS = []
     scale = scale
     start_x = [int(x) for x in start_x]
+    # Per-line extrema candidates, kept for the consensus repair pass
+    cand_valleys = []
+    cand_peaks = []
     
 
     if ultrasound_tracking == 1:
@@ -419,6 +512,8 @@ def process_ddts(
         # Get the local extrema values
         valleys = [ddt[indice] for indice in valley_indices]
         peaks = [ddt[indice] for indice in peaks_indices]
+        cand_valleys.append((np.asarray(valley_indices), np.asarray(valleys)))
+        cand_peaks.append((np.asarray(peaks_indices), np.asarray(peaks)))
         try:
             # Get the value of the biggest nadir in the first half of the dataset
             if detection_algorithm == 0:
@@ -523,8 +618,6 @@ def process_ddts(
 
                         OD2 = peaks_indices[arg3]
                         OD2_ = peaks_indices[arg3] + start_x[j]
-                        
-                        print("Detected ultrasound artery - using standard detection")
                     else:
                         OD1_ = 0
                         OD2_ = nx
@@ -594,7 +687,6 @@ def process_ddts(
                 ID1_ = OD1_
                 ID2 = OD2
                 ID2_ = OD2_
-                print("ID1, ID2: ",ID1, ID2)
 
         except:
             ID1_ = 0
@@ -648,6 +740,111 @@ def process_ddts(
     #     for i, el in enumerate(IDS)
     # ]  # Flag indicating if ID measurements are good
 
+    # Consensus repair pass (parallel-scanline mode only): every scanline
+    # crosses the same vessel, so edge positions must follow a smooth trend
+    # along the scanline sequence (a robust line fit - the vessel may cross
+    # the frame at an angle). A line whose edges break that trend has locked
+    # onto something else (sub-structure, debris, background shading):
+    # re-pick its edges from its own gradient signal near the predicted
+    # positions; if nothing is there, leave it for the outlier filter.
+    use_prior = (
+        edge_prior is not None
+        and consensus
+        and len(edge_prior[0]) == len(ddts)
+        and len(edge_prior[1]) == len(ddts)
+    )
+    if consensus and len(ddts) >= 5 and detection_algorithm in (0, 1, 2):
+        od1 = np.asarray(outer_diameters1_pos, dtype=float)
+        od2 = np.asarray(outer_diameters2_pos, dtype=float)
+
+        def theil_sen_predict(vals):
+            """Robust linear trend of edge position vs scanline index."""
+            n = len(vals)
+            idx = np.arange(n, dtype=float)
+            slopes = [
+                (vals[b] - vals[a]) / (b - a)
+                for a in range(n)
+                for b in range(a + 1, n)
+            ]
+            slope = np.median(slopes)
+            intercept = np.median(vals - slope * idx)
+            return intercept + slope * idx
+
+        if use_prior:
+            # Artefact re-detection: trust the previous frame's edges over
+            # this frame's own (possibly artefact-dominated) consensus.
+            pred1 = np.asarray(edge_prior[0], dtype=float)
+            pred2 = np.asarray(edge_prior[1], dtype=float)
+            med_w = np.median(pred2 - pred1)
+        else:
+            pred1 = pred2 = None
+            med_w = np.median(od2 - od1)
+
+        if med_w > 0:
+            if pred1 is None:
+                pred1 = theil_sen_predict(od1)
+                pred2 = theil_sen_predict(od2)
+            tol = max(10.0, 0.3 * med_w)
+
+            def strongest_near(j, pos, want_valley):
+                """Strongest correctly-signed extremum candidate near pos;
+                falls back to the strongest raw gradient in the window when
+                the wall is too weak for the peak detector."""
+                vi, vv = cand_valleys[j] if want_valley else cand_peaks[j]
+                if vi.size:
+                    mask = np.abs(vi + start_x[j] - pos) <= tol
+                    if mask.any():
+                        return int(vi[mask][np.argmax(np.abs(vv[mask]))])
+                ddt = np.asarray(ddts[j])
+                lo = int(max(0, pos - tol - start_x[j]))
+                hi = int(min(ddt.shape[0], pos + tol - start_x[j] + 1))
+                if hi <= lo:
+                    return None
+                seg = ddt[lo:hi]
+                return lo + int(np.argmin(seg) if want_valley else np.argmax(seg))
+
+            # Fluorescence (bright vessel): the first wall is a rising edge, so
+            # the peak/valley roles are swapped relative to transmitted light.
+            want_valley_first = detection_algorithm != 1
+            for j in range(len(ddts)):
+                if (
+                    abs(od1[j] - pred1[j]) <= tol
+                    and abs(od2[j] - pred2[j]) <= tol
+                    and abs((od2[j] - od1[j]) - med_w) <= tol
+                ):
+                    continue
+                vi, vv = cand_valleys[j]
+                pi, pv = cand_peaks[j]
+                new1 = strongest_near(j, pred1[j], want_valley=want_valley_first)
+                new2 = strongest_near(j, pred2[j], want_valley=not want_valley_first)
+                if new1 is None or new2 is None or new2 <= new1:
+                    continue
+                outer_diameters1_pos[j] = new1 + start_x[j]
+                outer_diameters2_pos[j] = new2 + start_x[j]
+                ODS[j] = scale * (outer_diameters2_pos[j] - outer_diameters1_pos[j])
+                if ID_mode != 0:
+                    if detection_algorithm == 2:
+                        # Ultrasound mode: ID positions track the OD positions
+                        inner_diameters1_pos[j] = outer_diameters1_pos[j]
+                        inner_diameters2_pos[j] = outer_diameters2_pos[j]
+                        IDS[j] = ODS[j]
+                    elif detection_algorithm == 0:
+                        # Same selection rules as the main algorithm-0 pass
+                        t1 = [i for i in pi if i > new1 and i < (new1 + (new2 - new1) / 2)]
+                        t2 = [i for i in vi if i < new2 and i > (new1 - (new2 - new1) / 2)]
+                        if t1 and t2:
+                            inner_diameters1_pos[j] = t1[0] + start_x[j]
+                            inner_diameters2_pos[j] = t2[-1] + start_x[j]
+                            IDS[j] = scale * (inner_diameters2_pos[j] - inner_diameters1_pos[j])
+                    else:
+                        # Same selection rules as the main algorithm-1 pass
+                        t1 = [i for i in vi if i > new1 and i < (new1 + (new2 - new1) / 2)]
+                        t2 = [i for i in pi if i < new2 and i > (new1 + (new2 - new1) / 2)]
+                        if t1 and t2:
+                            inner_diameters1_pos[j] = t1[0] + start_x[j]
+                            inner_diameters2_pos[j] = t2[-1] + start_x[j]
+                            IDS[j] = scale * (inner_diameters2_pos[j] - inner_diameters1_pos[j])
+
     ODS_zscore = is_outlier(np.asarray(ODS), thresh_factor)
     IDS_zscore = is_outlier(np.asarray(IDS), thresh_factor)
 
@@ -669,6 +866,195 @@ def process_ddts(
         inner_diam=np.array(IDS),
     )
 
+
+def _theil_sen_predict(vals):
+    """Robust linear trend of a per-scanline quantity vs scanline index."""
+    vals = np.asarray(vals, dtype=float)
+    n = len(vals)
+    idx = np.arange(n, dtype=float)
+    if n < 2:
+        return vals.copy()
+    slopes = [
+        (vals[b] - vals[a]) / (b - a)
+        for a in range(n)
+        for b in range(a + 1, n)
+    ]
+    slope = np.median(slopes)
+    intercept = np.median(vals - slope * idx)
+    return intercept + slope * idx
+
+
+def _subpixel_extremum(v, i):
+    """Parabolic sub-pixel position of the extremum of `v` nearest index `i`."""
+    if i <= 0 or i >= len(v) - 1:
+        return float(i)
+    a, b, c = float(v[i - 1]), float(v[i]), float(v[i + 1])
+    denom = a - 2.0 * b + c
+    if denom == 0.0:
+        return float(i)
+    return i + 0.5 * (a - c) / denom
+
+
+def _fmd_one_profile(prof, sigma, prior_pair, search_frac):
+    """Locate (outer_near, inner_near, inner_far, outer_far) in one depth
+    profile that runs across the vessel: tissue - near wall - anechoic lumen -
+    far wall - tissue. Returns indices into `prof` or None.
+
+    inner_* are the lumen-intima interfaces (the FMD lumen diameter); outer_*
+    are the adventitial sides of each wall complex.
+    """
+    p = ndimage.gaussian_filter1d(np.asarray(prof, dtype=float), sigma)
+    g = np.gradient(p)
+    n = len(p)
+    if n < 12:
+        return None
+
+    if prior_pair is not None:
+        # Constrain the wall-peak search near last frame's lumen edges.
+        pn, pf = sorted(prior_pair)
+        tol = max(8.0, 0.35 * abs(pf - pn))
+        n_lo, n_hi = pn - tol, pn + tol
+        f_lo, f_hi = pf - tol, pf + tol
+    else:
+        lo, hi = search_frac
+        n_lo, n_hi = lo * n, 0.60 * n
+        f_lo, f_hi = 0.40 * n, hi * n
+    n_lo = int(np.clip(n_lo, 1, n - 6))
+    n_hi = int(np.clip(n_hi, n_lo + 2, n - 4))
+    f_hi = int(np.clip(f_hi, n_lo + 6, n - 1))
+    f_lo = int(np.clip(f_lo, n_lo + 4, f_hi - 2))
+
+    # darkest interior point = lumen centre; walls are the maxima either side
+    mid_lo, mid_hi = max(n_lo, 1), min(f_hi, n - 1)
+    if mid_hi - mid_lo < 3:
+        return None
+    lumen_c = mid_lo + int(np.argmin(p[mid_lo:mid_hi]))
+    near_hi = int(np.clip(min(n_hi, lumen_c), n_lo + 2, n - 2))
+    near_pk = n_lo + int(np.argmax(p[n_lo:near_hi]))
+    far_lo = int(np.clip(max(lumen_c + 1, f_lo), near_pk + 4, f_hi - 2))
+    far_pk = far_lo + int(np.argmax(p[far_lo:f_hi]))
+    if far_pk - near_pk < 6:
+        return None
+
+    half = near_pk + (far_pk - near_pk) // 2
+    # lumen-side gradients: bright->dark just past the near peak (min gradient),
+    # dark->bright just before the far peak (max gradient)
+    ni_seg = g[near_pk:half + 1]
+    fi_seg = g[half:far_pk + 1]
+    if ni_seg.size < 2 or fi_seg.size < 2:
+        return None
+    ni = _subpixel_extremum(g, near_pk + int(np.argmin(ni_seg)))
+    fi = _subpixel_extremum(g, half + int(np.argmax(fi_seg)))
+    # Outer diameter = the wall reflections themselves (peak-to-peak). The
+    # adventitial gradient is unreliable on cluttered B-mode; the peaks are
+    # stable and give a sensible wall-centre-to-wall-centre outer measure.
+    on, of = float(near_pk), float(far_pk)
+    if not (on <= ni < fi <= of):
+        return None
+    return on, ni, fi, of
+
+
+def process_walls_fmd(
+    data, start_x, scale, thresh_factor, compute_id,
+    smooth_factor=16, consensus=True, edge_prior=None,
+) -> DdtResult:
+    """B-mode vascular-ultrasound wall tracker for flow-mediated dilation.
+
+    Each ``data[j]`` is a depth profile across the vessel, already averaged
+    over a run of positions along the vessel by the ROI line-integration
+    setting (speckle on a single line swamps the wall gradients otherwise).
+
+    Per profile it fits an explicit wall model - the two bright wall
+    reflections either side of the anechoic lumen - and reports:
+      * inner diameter = the lumen-intima interfaces (the FMD measurement)
+      * outer diameter = the adventitial sides of the two wall complexes
+    A robust cross-profile line fit repairs profiles that disagree with the
+    trend; an optional ``edge_prior`` (previous frame's lumen edges) narrows
+    the search while the vessel translates.
+    """
+    start_x = [int(x) for x in start_x]
+    n_lines = len(data)
+    sigma = max(1.0, float(smooth_factor) / 8.0)
+
+    prior = None
+    if edge_prior is not None and len(edge_prior[0]) == n_lines:
+        prior = [
+            (float(edge_prior[0][k]) - start_x[k], float(edge_prior[1][k]) - start_x[k])
+            for k in range(n_lines)
+        ]
+
+    on = np.full(n_lines, np.nan)
+    ni = np.full(n_lines, np.nan)
+    fi = np.full(n_lines, np.nan)
+    of = np.full(n_lines, np.nan)
+    for k, prof in enumerate(data):
+        r = _fmd_one_profile(prof, sigma, prior[k] if prior else None, (0.05, 0.95))
+        if r is None and prior:
+            r = _fmd_one_profile(prof, sigma, None, (0.05, 0.95))
+        if r is None:
+            continue
+        o1, i1, i2, o2 = r
+        on[k], ni[k], fi[k], of[k] = (o1 + start_x[k], i1 + start_x[k],
+                                      i2 + start_x[k], o2 + start_x[k])
+
+    # Cross-profile consensus: the lumen edges must follow a smooth trend
+    # along the scanline sequence. Re-pick outliers near the robust fit.
+    good = np.isfinite(ni) & np.isfinite(fi)
+    if consensus and good.sum() >= 5:
+        pred_n = _theil_sen_predict(np.where(good, ni, np.nanmedian(ni[good])))
+        pred_f = _theil_sen_predict(np.where(good, fi, np.nanmedian(fi[good])))
+        med_w = float(np.nanmedian(fi[good] - ni[good]))
+        tol = max(6.0, 0.30 * med_w)
+        for k, prof in enumerate(data):
+            if good[k] and abs(ni[k] - pred_n[k]) <= tol and abs(fi[k] - pred_f[k]) <= tol:
+                continue
+            r = _fmd_one_profile(
+                prof, sigma,
+                (pred_n[k] - start_x[k], pred_f[k] - start_x[k]), (0.05, 0.95),
+            )
+            if r is None:
+                continue
+            o1, i1, i2, o2 = r
+            on[k], ni[k], fi[k], of[k] = (o1 + start_x[k], i1 + start_x[k],
+                                          i2 + start_x[k], o2 + start_x[k])
+        good = np.isfinite(ni) & np.isfinite(fi)
+
+    # Fill any still-missing profiles from the trend so downstream shapes hold.
+    if good.any():
+        fill_n = _theil_sen_predict(np.where(good, ni, np.nanmedian(ni[good])))
+        fill_f = _theil_sen_predict(np.where(good, fi, np.nanmedian(fi[good])))
+        fill_on = _theil_sen_predict(np.where(good, on, np.nanmedian(on[good])))
+        fill_of = _theil_sen_predict(np.where(good, of, np.nanmedian(of[good])))
+        bad = ~good
+        ni[bad], fi[bad] = fill_n[bad], fill_f[bad]
+        on[bad], of[bad] = fill_on[bad], fill_of[bad]
+    else:
+        # nothing found - hand back a degenerate result
+        z = np.zeros(n_lines)
+        return DdtResult(
+            outer_diam_pos=np.column_stack((z, z)).astype(int),
+            inner_diam_pos=np.column_stack((z, z)),
+            od_outliers=np.ones(n_lines, dtype=bool),
+            id_outliers=np.ones(n_lines, dtype=bool),
+            outer_diam=z, inner_diam=np.full(n_lines, np.nan),
+        )
+
+    ODS = scale * (of - on)
+    IDS = scale * (fi - ni)
+    if not compute_id:
+        ni[:] = np.nan
+        fi[:] = np.nan
+        IDS = np.full(n_lines, np.nan)
+
+    return DdtResult(
+        outer_diam_pos=np.nan_to_num(np.column_stack((on, of))).astype(int),
+        inner_diam_pos=np.column_stack((ni, fi)),
+        od_outliers=is_outlier(np.asarray(ODS), thresh_factor),
+        id_outliers=(is_outlier(np.asarray(IDS), thresh_factor)
+                     if compute_id else np.zeros(n_lines, dtype=bool)),
+        outer_diam=ODS,
+        inner_diam=IDS,
+    )
 
 
 ### Outlier function is from here:
@@ -703,6 +1089,12 @@ def is_outlier(points, thresh):
     diff = np.sum((points - median) ** 2, axis=-1)
     diff = np.sqrt(diff)
     med_abs_deviation = np.median(diff)
+
+    # When at least half the points agree exactly, MAD is 0. The z-score is
+    # then infinite for any deviating point, so flag exactly those (this
+    # matches the previous inf/nan arithmetic, without the divide warnings).
+    if med_abs_deviation == 0:
+        return diff > 0
 
     modified_z_score = 0.6745 * diff / med_abs_deviation
 

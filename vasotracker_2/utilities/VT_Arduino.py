@@ -49,6 +49,15 @@ from skimage import io
 import skimage
 from skimage import measure
 import serial
+
+# Both "pyserial" and the unrelated "serial" (a serialization library) install
+# a module named `serial`. If the wrong one is present - or got bundled into a
+# build - fail loudly with the fix instead of a cryptic AttributeError later.
+if not hasattr(serial, "Serial"):
+    raise ImportError(
+        "The installed 'serial' module is not pyserial (the unrelated 'serial' "
+        "package is shadowing it). Fix with: pip uninstall serial && pip install pyserial"
+    )
 import win32com.client
 import webbrowser
 
@@ -94,6 +103,11 @@ class Arduino:
         self.measured_pressure_avg = None
         self.measured_temperature = None
 
+        # For background thread
+        self._running = False
+        self._thread = None
+        self._lock = threading.Lock()
+
         ### Finds COM port that the Arduino is on (assumes only one Arduino is connected)
         wmi = win32com.client.GetObject("winmgmts:")
         ArduinoComs = []
@@ -108,16 +122,49 @@ class Arduino:
                 #)
         self.PORTS = []
         for i, comPort in enumerate(ArduinoComs):
-            GLOBAL_PORT = serial.Serial(comPort, baudrate=9600, dsrdtr=True)
+            GLOBAL_PORT = serial.Serial(comPort, baudrate=9600, dsrdtr=True, timeout=0.1)
             # GLOBAL_PORT.setDTR(True)
 
             self.PORTS.append(GLOBAL_PORT)
             # print(self.PORTS)
 
+        # Start background polling thread
+        self._start_background_polling()
+
     def getports(self):
         return self.PORTS
 
+    def _start_background_polling(self):
+        """Start background thread that continuously polls Arduino."""
+        if len(self.PORTS) == 0:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._polling_loop, daemon=True)
+        self._thread.start()
+
+    def _polling_loop(self):
+        """Background loop that continuously reads from Arduino."""
+        while self._running:
+            try:
+                data = self._getData_blocking()
+                with self._lock:
+                    self._sortdata_internal(data)
+            except:
+                pass
+            # Small sleep to prevent CPU spinning
+            time.sleep(0.01)
+
+    def stop_polling(self):
+        """Stop the background polling thread."""
+        self._running = False
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
     def getData(self):
+        """Return cached data (non-blocking) - for backwards compatibility."""
+        return [[""]]  # Return dummy, actual data is in measured_* attributes
+
+    def _getData_blocking(self):
         data = [[] for i in range(2)]
         for i, GLOBAL_PORT in enumerate(self.PORTS):
             try:
@@ -140,58 +187,51 @@ class Arduino:
                     if ord(x) != startMarker:
                         ck += x  # Concatenate bytes
                     x = GLOBAL_PORT.read()
-                data[i].append(ck.decode("utf-8")) 
+                data[i].append(ck.decode("utf-8"))
                 #print("data received = ", ck.decode("utf-8"))  # Decode bytes to string
             except:
                 ck = b"Nodata:0;Nodata2:0"
-            
+
             data[i].append(ck.decode("utf-8"))  # Decode bytes to string
-        
+
         return data
 
-    def sortdata(self,temppres):
-    
-        # Initialize variables
-        temp = np.nan
-        pres1 = np.nan
-        pres2 = np.nan
-
-        # Loop through the data from the two Arduinos (tempres contains dummy data if < 2 connected)
+    def _sortdata_internal(self, temppres):
+        """Internal method called by background thread to update cached values."""
+        # Loop through the data from the two Arduinos
         for data in temppres:
             if len(data) > 0:
+                try:
+                    # Split the data by Arduino
+                    val = data[0].strip('\n\r').split(';')
+                    val = val[:-1]
+                    val = [el.split(':') for el in val]
 
-                # Split the data by Arduino
-                val = data[0].strip('\n\r').split(';')
-                val = val[:-1]
-                val = [el.split(':') for el in val]
+                    # Get the temperature value
+                    if val[0][0] == "T1":
+                        try:
+                            self.measured_temperature = float(val[0][1])
+                        except:
+                            self.measured_temperature = np.nan
 
-                # Get the temperature value
-                if val[0][0] == "T1":
-                    try:
-                        self.measured_temperature = float(val[0][1])
-                    except:
-
-                        self.measured_temperature = np.nan
-                    #set_temp = float(val[1][1])
-
-                # Get the pressure value
-                elif val[0][0] == "P1":
-                    try:
-                        self.measured_pressure_1  = float(val[0][1])
-                        self.measured_pressure_2 = float(val[1][1])
-                        self.measured_pressure_avg = np.average([self.measured_pressure_1, self.measured_pressure_2], axis=None)
-
-                    except:
-                        self.measured_pressure_1 = np.nan
-                        self.measured_pressure_2 = np.nan
-                        self.measured_pressure_avg = np.nan
-
-                else:
+                    # Get the pressure value
+                    elif val[0][0] == "P1":
+                        try:
+                            self.measured_pressure_1 = float(val[0][1])
+                            self.measured_pressure_2 = float(val[1][1])
+                            self.measured_pressure_avg = np.average([self.measured_pressure_1, self.measured_pressure_2], axis=None)
+                        except:
+                            self.measured_pressure_1 = np.nan
+                            self.measured_pressure_2 = np.nan
+                            self.measured_pressure_avg = np.nan
+                except:
                     pass
-            else:
-                pass
 
-        return  self.measured_pressure_1, self.measured_pressure_2, self.measured_pressure_avg, self.measured_temperature
+    def sortdata(self, temppres):
+        """Return cached values (non-blocking) - called by main thread."""
+        # Just return the cached values updated by background thread
+        with self._lock:
+            return self.measured_pressure_1, self.measured_pressure_2, self.measured_pressure_avg, self.measured_temperature
 
 
     def sendData(self, pressure):
@@ -202,7 +242,7 @@ class Arduino:
         x = msg.encode("ascii")
         for i, GLOBAL_PORT in enumerate(self.PORTS):
             GLOBAL_PORT.flushInput()
-            GLOBAL_PORT.flushOutput() 
+            GLOBAL_PORT.flushOutput()
 
             try:
                 GLOBAL_PORT.write(x)  # Send the encoded message
